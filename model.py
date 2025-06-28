@@ -80,4 +80,4 @@ class AudioMultiBranchCNN(nn.Module):
 
         # FC layers
         x = self.fc(x)
-        return torch.sigmoid(x).squeeze(-1) 
+        return torch.sigmoid(x).squeeze(-1)  
