@@ -1,3 +1,3 @@
-# Basic-Audiofake-Detector-Test-
+# Basic-Audi-Detector-Test
 
-A basic implemenatation of a 3 branch audio fake detector trained on the hugging face Hemg/Deepfake-Audio-Dataset dataset
+Rough draft basic three branch wavelet / spectrogram / raw waveform info audifake detector.  
