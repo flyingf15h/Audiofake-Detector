@@ -48,7 +48,7 @@ class FusionBlock(nn.Module):
         fused = torch.cat([w[0]*b1, w[1]*b2, w[2]*b3], dim=1)
         return self.fc(fused).squeeze(-1)  
 
-class AudioMultiBranchCNN(nn.Module):
+class MultiCNN(nn.Module):
     def __init__(self):
         super().__init__()
         # Branch 1: Raw waveform (1D Conv)

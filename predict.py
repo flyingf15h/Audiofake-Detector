@@ -2,41 +2,55 @@ import torch
 import numpy as np
 import librosa
 import pywt
-from model import AudioMultiBranchCNN
+from model import MultiCNN
 
-# Same preprocessing as training
-def prepare_inputs_from_array(audio_array, sr=16000, fixed_length=16000):
+def prepInputArray(audio_array, sr=16000, fixed_length=16000):
     audio_array = librosa.util.fix_length(audio_array, size=fixed_length)
-    x_raw = np.expand_dims(audio_array, axis=0)
+
+    # Normalize
+    x_raw = (audio_array - np.mean(audio_array)) / (np.std(audio_array) + 1e-6)
+    x_raw = x_raw[np.newaxis, :]  # Shape: (1, 16000)
+
+    # Spectrogram
     stft = librosa.stft(audio_array, n_fft=512, hop_length=256)
     mag = np.abs(stft)
-    mag = mag[:128, :128]
-    x_fft = np.expand_dims(mag, axis=0)
+    mag = mag[:128, :128]  
+    mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-6)
+    x_fft = mag[np.newaxis, :, :]  # Shape: (1, 128, 128)
+
+    # Wavelet 
     coeffs = pywt.wavedec(audio_array, 'db4', level=4)
     cA4 = coeffs[0]
     cA4_resized = np.resize(cA4, (64, 128))
-    x_wav = np.expand_dims(cA4_resized, axis=0)
-    return x_raw, x_fft, x_wav
+    cA4_resized = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-6)
+    x_wav = cA4_resized[np.newaxis, :, :]  # Shape: (1, 64, 128)
+
+    return x_raw.astype(np.float32), x_fft.astype(np.float32), x_wav.astype(np.float32)
+
 
 def predict(audio_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = AudioMultiBranchCNN().to(device)
+
+    # Load model audio preprocess
+    model = MultiCNN().to(device)
     model.load_state_dict(torch.load("best_model.pth", map_location=device))
     model.eval()
 
-    # Load and preprocess audio
-    audio_array, sr = librosa.load(audio_path, sr=16000)
-    x_raw, x_fft, x_wav = prepare_inputs_from_array(audio_array)
+    audio_array, _ = librosa.load(audio_path, sr=16000)
+    x_raw, x_fft, x_wav = prepInputArray(audio_array)
 
-    # Convert to tensor and send to device
-    x_raw = torch.tensor(x_raw).unsqueeze(0).float().to(device)
-    x_fft = torch.tensor(x_fft).unsqueeze(0).float().to(device)
-    x_wav = torch.tensor(x_wav).unsqueeze(0).float().to(device)
+    x_raw = torch.tensor(x_raw).unsqueeze(0).to(device)  # (1, 1, 16000)
+    x_fft = torch.tensor(x_fft).unsqueeze(0).to(device)  # (1, 1, 128, 128)
+    x_wav = torch.tensor(x_wav).unsqueeze(0).to(device)  # (1, 1, 64, 128)
 
     with torch.no_grad():
-        output = model(x_raw, x_fft, x_wav).item()
-        label = "FAKE" if output >= 0.5 else "REAL"
-        print(f"Prediction: {label} (score: {output:.4f})")
+        prob = model(x_raw, x_fft, x_wav).item()
+        label = "Fake" if prob >= 0.5 else "Real"
+        print(f"Prediction: {label} (score: {prob:.4f})")
+
+def prepInputFile(path):
+    audio_array, _ = librosa.load(path, sr=16000)
+    return prepInputArray(audio_array)
 
 if __name__ == "__main__":
     import sys
