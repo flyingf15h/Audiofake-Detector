@@ -62,26 +62,25 @@ def collate_fn(batch):
     return x_raw, x_fft, x_wav, y
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
-    # Fix length first
-    audioArr = librosa.util.fix_length(audioArr, size=fixed_length)
+    audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
     
     # Raw waveform with normalization
     x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
-    x_raw = np.expand_dims(x_raw, axis=0)
+    x_raw = np.expand_dims(x_raw, axis=0).astype(np.float32)
 
     # FFT magnitude spectrogram with normalization
     stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
     mag = np.abs(stft)
     mag = mag[:128, :128]
     mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
-    x_fft = np.expand_dims(mag, axis=0)
+    x_fft = np.expand_dims(mag, axis=0).astype(np.float32)
 
     # Wavelet coefficients with normalization
     coeffs = pywt.wavedec(audioArr, 'db4', level=4)
     cA4 = coeffs[0]
     cA4_resized = np.resize(cA4, (64, 128))
     cA4_resized = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
-    x_wav = np.expand_dims(cA4_resized, axis=0)
+    x_wav = np.expand_dims(cA4_resized, axis=0).astype(np.float32)
 
     return x_raw, x_fft, x_wav
 
