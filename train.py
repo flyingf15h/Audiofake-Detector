@@ -6,13 +6,15 @@ from datasets import load_dataset
 import numpy as np
 import librosa
 import pywt
-from model import AudioMultiBranchCNN  
-from sklearn.metrics import accuracy_score, roc_auc_score
+from model import AudioMultiBranchCNN
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+from collections import Counter
+import random
 
-# Dataset wrapper 
-class AudioFakeDataset(Dataset):
-    def __init__(self, hf_dataset):
+class AudioFakeDataset(Dataset):  
+    def __init__(self, hf_dataset, augment=False):
         self.ds = hf_dataset
+        self.augment = augment
 
     def __len__(self):
         return len(self.ds)
@@ -20,11 +22,34 @@ class AudioFakeDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.ds[idx]
         audio_array = sample['audio']['array'].astype(np.float32)
+        
+        # Apply data augmentation during training
+        if self.augment:
+            audio_array = self.apply_augmentation(audio_array)      
+            
         x_raw, x_fft, x_wav = prepare_inputs_from_array(audio_array)
         label = float(sample['label'])
         return torch.tensor(x_raw), torch.tensor(x_fft), torch.tensor(x_wav), torch.tensor(label)
+    
+    def apply_augmentation(self, audio):  
+        """Apply random augmentations to audio"""
+        # Random time shift
+        if random.random() < 0.3:
+            shift = random.randint(-1600, 1600) 
+            audio = np.roll(audio, shift)
+        
+        # Random amplitude scaling
+        if random.random() < 0.3:
+            scale = random.uniform(0.8, 1.2)
+            audio = audio * scale
+        
+        # Add small amount of noise
+        if random.random() < 0.2:
+            noise = np.random.normal(0, 0.005, audio.shape)
+            audio = audio + noise
+            
+        return audio
 
-# batch and stack inputs
 def collate_fn(batch):
     raws, ffts, wavs, labels = zip(*batch)
     x_raw = torch.stack(raws)
@@ -33,41 +58,45 @@ def collate_fn(batch):
     y = torch.tensor(labels).float()
     return x_raw, x_fft, x_wav, y
 
-# Audio preprocessing 
 def prepare_inputs_from_array(audio_array, sr=16000, fixed_length=16000):
+    # Fix length first
     audio_array = librosa.util.fix_length(audio_array, size=fixed_length)
-    # Raw waveform shape (1, fixed_length)
-    x_raw = np.expand_dims(audio_array, axis=0)
+    
+    # Raw waveform with normalization
+    x_raw = (audio_array - np.mean(audio_array)) / (np.std(audio_array) + 1e-8)
+    x_raw = np.expand_dims(x_raw, axis=0)
 
-    # FFT magnitude spectrogram shape (1, 128, 128)
+    # FFT magnitude spectrogram with normalization
     stft = librosa.stft(audio_array, n_fft=256, hop_length=128)
     mag = np.abs(stft)
-    mag = mag[:128, :128]  # crop or pad to fixed size
+    mag = mag[:128, :128]
+    mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
     x_fft = np.expand_dims(mag, axis=0)
 
-    # Wavelet coefficients shape (1, 64, 128)
+    # Wavelet coefficients with normalization
     coeffs = pywt.wavedec(audio_array, 'db4', level=4)
     cA4 = coeffs[0]
     cA4_resized = np.resize(cA4, (64, 128))
+    cA4_resized = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
     x_wav = np.expand_dims(cA4_resized, axis=0)
 
     return x_raw, x_fft, x_wav
 
-# Training for one epoch
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
     model.train()
     running_loss = 0
     for x_raw, x_fft, x_wav, y in dataloader:
         x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
         optimizer.zero_grad()
-        output = model(x_raw, x_fft, x_wav).squeeze()
+        output = model(x_raw, x_fft, x_wav)
         loss = criterion(output, y)
         loss.backward()
+        # Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         running_loss += loss.item() * y.size(0)
     return running_loss / len(dataloader.dataset)
 
-# Evaluation 
 def evaluate(model, dataloader, device):
     model.eval()
     all_preds = []
@@ -75,9 +104,11 @@ def evaluate(model, dataloader, device):
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in dataloader:
             x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-            preds = model(x_raw, x_fft, x_wav).squeeze()
-            all_preds.append(preds.cpu())
+            logits = model(x_raw, x_fft, x_wav)
+            probs = torch.sigmoid(logits)
+            all_preds.append(probs.cpu())
             all_labels.append(y.cpu())
+    
     all_preds = torch.cat(all_preds).numpy()
     all_labels = torch.cat(all_labels).numpy()
 
@@ -85,67 +116,117 @@ def evaluate(model, dataloader, device):
     acc = accuracy_score(all_labels, pred_labels)
     try:
         auc = roc_auc_score(all_labels, all_preds)
-    except ValueError:
-        auc = float('nan')  
-    return acc, auc
+    except ValueError: 
+        auc = float('nan')
+    return acc, auc, all_labels, pred_labels
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
     print("Loading dataset...")
-    dataset = load_dataset("Hemg/Deepfake-Audio-Dataset")['train']
+    try:
+        dataset = load_dataset("Hemg/Deepfake-Audio-Dataset")['train']
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
 
-    # Split train/test 80/20
-    split_ds = dataset.train_test_split(test_size=0.2)
-    train_ds = AudioFakeDataset(split_ds['train'])
-    test_ds = AudioFakeDataset(split_ds['test'])
+    # Check class distribution
+    try:
+        label_counts = Counter([sample['label'] for sample in dataset])
+        print(f"Dataset size: {len(dataset)}")
+        print(f"Class distribution: {label_counts}")
+        
+        # Calculate class weights for balanced loss
+        total = sum(label_counts.values())
+        pos_weight = label_counts[0] / label_counts[1] if label_counts[1] > 0 else 1.0
+        print(f"Positive weight (for class 1): {pos_weight:.2f}")
+    except Exception as e:
+        print(f"Error analyzing dataset: {e}")
+        return
 
-    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, collate_fn=collate_fn)
-    test_loader = DataLoader(test_ds, batch_size=16, shuffle=False, collate_fn=collate_fn)
+    try:
+        # Use smaller subset for laptop training
+        print("Using subset of data for laptop training...")
+        dataset = dataset.select(range(min(1000, len(dataset)))) 
+        
+        split_ds = dataset.train_test_split(test_size=0.2, stratify_by_column='label')
+        train_ds = AudioFakeDataset(split_ds['train'], augment=True)
+        test_ds = AudioFakeDataset(split_ds['test'], augment=False)
 
-    model = AudioMultiBranchCNN().to(device)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+        batch_size = 2
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
-    # Learning rate scheduler reduces LR if no improvement in val loss for 3 epochs
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+        model = AudioMultiBranchCNN().to(device)
+        print(f"Model loaded successfully")
+        
+        # Weighted loss to handle class imbalance
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+        
+        optimizer = optim.Adam(model.parameters(), lr=0.0004, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3)
 
-    # Stop if no improvement for 7 epochs
-    best_loss = float('inf')
-    patience = 7  # 
-    epochs_no_improve = 0
-    epochs = 100
+        best_loss = float('inf')
+        patience = 10  
+        epochs_no_improve = 6
+        epochs = 109   
 
-    for epoch in range(epochs):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        print(f"\nStarting training for {epochs} epochs...")
+        for epoch in range(epochs):
+            print(f"Starting epoch {epoch + 1}/{epochs}...")
+            train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
 
-        # Evaluate on test set each epoch to get val loss for scheduler and early stopping
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for x_raw, x_fft, x_wav, y in test_loader:
-                x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-                outputs = model(x_raw, x_fft, x_wav).squeeze()
-                loss = criterion(outputs, y)
-                val_loss += loss.item() * y.size(0)
-        val_loss /= len(test_loader.dataset)
+            # Validation
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for x_raw, x_fft, x_wav, y in test_loader:
+                    x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
+                    outputs = model(x_raw, x_fft, x_wav)
+                    loss = criterion(outputs, y)
+                    val_loss += loss.item() * y.size(0)
+            val_loss /= len(test_loader.dataset)
 
-        print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f}")
+            # Get validation accuracy for monitoring
+            val_acc, val_auc, _, _ = evaluate(model, test_loader, device)
 
-        scheduler.step(val_loss)  # adjust LR based on val loss
+            print(f"Epoch {epoch + 1}/{epochs}")
+            print(f"  Train Loss: {train_loss:.4f}")
+            print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val AUC: {val_auc:.4f}")
 
-        # Early stopping check
-        if val_loss < best_loss:
-            best_loss = val_loss
-            epochs_no_improve = 0
-            torch.save(model.state_dict(), "best_model.pth")
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                print(f"Early stopping triggered after {epoch + 1} epochs with no improvement.")
-                break
+            scheduler.step(val_loss)
 
-    acc, auc = evaluate(model, test_loader, device)
-    print(f"\nFinal Evaluation:\nTest Accuracy: {acc:.4f}\nTest ROC AUC: {auc:.4f}")
+            # Save best model based on validation loss
+            if val_loss < best_loss:
+                best_loss = val_loss
+                epochs_no_improve = 0
+                torch.save(model.state_dict(), "best_model.pth")
+                print(f"  ✓ New best model saved!")
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs with no improvement.")
+                    break
+
+        # Final evaluation
+        print("\n" + "="*50)
+        print("FINAL EVALUATION")
+        print("="*50)
+        
+        # Load best model
+        model.load_state_dict(torch.load("best_model.pth"))
+        acc, auc, true_labels, pred_labels = evaluate(model, test_loader, device)
+        
+        print(f"Test Accuracy: {acc:.4f}")
+        print(f"Test ROC AUC: {auc:.4f}")
+        print("\nDetailed Classification Report:")
+        print(classification_report(true_labels, pred_labels, target_names=['Real', 'Fake']))
+        
+    except Exception as e:
+        print(f"Error during training: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
