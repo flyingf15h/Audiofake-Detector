@@ -58,7 +58,7 @@ def collate_fn(batch):
     x_raw = torch.stack(raws)
     x_fft = torch.stack(ffts)
     x_wav = torch.stack(wavs)
-    y = torch.tensor(labels).float()
+    y = torch.tensor(labels, dtype=torch.float32)
     return x_raw, x_fft, x_wav, y
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
