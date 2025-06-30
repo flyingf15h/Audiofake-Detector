@@ -199,15 +199,15 @@ def main():
                 best_loss = val_loss
                 epochs_noImprove = 0
                 torch.save(model.state_dict(), "best_model.pth")
-                print(f"  ✓ New best model saved!")
+                print(f"New best model saved")
             else:
                 epochs_noImprove += 1
                 if epochs_noImprove >= patience:
-                    print(f"\nEarly stopping triggered after {epoch + 1} epochs with no improvement.")
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs no improvement.")
                     break
 
         print("\n" + "="*50)
-        print("FINAL EVALUATION")
+        print("Evaluation")
         print("="*50)
         
         # Load best model
