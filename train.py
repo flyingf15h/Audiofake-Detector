@@ -12,9 +12,9 @@ from collections import Counter
 import random
 
 class fakeDataset(Dataset):  
-    def __init__(self, hf_dataset, augment=False):
+    def __init__(self, hf_dataset, doaugment=False):
         self.ds = hf_dataset
-        self.augment = augment
+        self.doaugment = doaugment
 
     def __len__(self):
         return len(self.ds)
@@ -23,9 +23,8 @@ class fakeDataset(Dataset):
         sample = self.ds[idx]
         audioArr = sample['audio']['array'].astype(np.float32)
         
-        # Apply data augmentation during training
-        if self.augment:
-            audioArr = self.augment(audioArr)      
+        if self.doaugment:
+            audioArr = self.augmentAudio(audioArr)      
             
         x_raw, x_fft, x_wav = prepInputArray(audioArr)
         label = float(sample['label'])
@@ -37,7 +36,7 @@ class fakeDataset(Dataset):
         )
 
     
-    def augment(self, audio):  
+    def augmentAudio(self, audio):  
         # Random time shift, amplitude scaling, noise
         if random.random() < 0.3:
             shift = random.randint(-1600, 1600) 
@@ -64,18 +63,18 @@ def collate_fn(batch):
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
     audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
     
-    # Raw waveform with normalization
+    # Raw waveform w normalization
     x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
     x_raw = np.expand_dims(x_raw, axis=0).astype(np.float32)
 
-    # FFT magnitude spectrogram with normalization
+    # Spectrogram wn  
     stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
     mag = np.abs(stft)
     mag = mag[:128, :128]
     mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
     x_fft = np.expand_dims(mag, axis=0).astype(np.float32)
 
-    # Wavelet coefficients with normalization
+    # Wavelet coeffs wn
     coeffs = pywt.wavedec(audioArr, 'db4', level=4)
     cA4 = coeffs[0]
     cA4_resized = np.resize(cA4, (64, 128))
@@ -195,7 +194,7 @@ def main():
 
             scheduler.step(val_loss)
 
-            # Save best model based on validation loss
+            # Save best model 
             if val_loss < best_loss:
                 best_loss = val_loss
                 epochs_no_improve = 0
@@ -207,7 +206,6 @@ def main():
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs with no improvement.")
                     break
 
-        # Final evaluation
         print("\n" + "="*50)
         print("FINAL EVALUATION")
         print("="*50)
