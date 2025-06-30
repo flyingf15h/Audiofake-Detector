@@ -83,7 +83,7 @@ def prepInputArray(audioArr, sr=16000, fixed_length=16000):
 
     return x_raw, x_fft, x_wav
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
+def train_1epoch(model, dataloader, criterion, optimizer, device):
     model.train()
     running_loss = 0
     for x_raw, x_fft, x_wav, y in dataloader:
@@ -148,8 +148,8 @@ def main():
     try:
  
         split_ds = dataset.train_test_split(test_size=0.2, stratify_by_column='label')
-        train_ds = fakeDataset(split_ds['train'], augment=True)
-        test_ds = fakeDataset(split_ds['test'], augment=False)
+        train_ds = fakeDataset(split_ds['train'], doaugment=True)
+        test_ds = fakeDataset(split_ds['test'], doaugment=False)
 
         batch_size = 2
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
@@ -166,13 +166,13 @@ def main():
 
         best_loss = float('inf')
         patience = 10  
-        epochs_no_improve = 6
+        epochs_noImprove = 6
         epochs = 109   
 
         print(f"\nStarting training for {epochs} epochs...")
         for epoch in range(epochs):
             print(f"Starting epoch {epoch + 1}/{epochs}...")
-            train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+            train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
 
             # Validation
             model.eval()
@@ -197,12 +197,12 @@ def main():
             # Save best model 
             if val_loss < best_loss:
                 best_loss = val_loss
-                epochs_no_improve = 0
+                epochs_noImprove = 0
                 torch.save(model.state_dict(), "best_model.pth")
                 print(f"  ✓ New best model saved!")
             else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
+                epochs_noImprove += 1
+                if epochs_noImprove >= patience:
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs with no improvement.")
                     break
 
