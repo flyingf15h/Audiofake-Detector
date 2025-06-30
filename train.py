@@ -11,6 +11,15 @@ from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 from collections import Counter
 import random
 import glob
+import warnings
+
+def validatefile(file_path):
+    try:
+        _, _ = librosa.load(file_path, sr=16000, duration=0.1)
+        return True
+    except Exception as e:
+        print(f"Skipping corrupted file: {file_path} - Error: {str(e)}")
+        return False
 
 def loadfiles(data_dir, target_splits):
     all_files = []
@@ -24,8 +33,13 @@ def loadfiles(data_dir, target_splits):
                 for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
                     fake_files.extend(glob.glob(os.path.join(fake_path, ext)))
                 
-                print(f"Found {len(fake_files)} fake files in {fake_path}")
-                all_files.extend([(f, 1) for f in fake_files])  # 1 for fake
+                validate_fake = []
+                for f in fake_files:
+                    if os.path.isfile(f) and validatefile(f):
+                        validate_fake.append(f)
+                
+                print(f"Found {len(validate_fake)}/{len(fake_files)} valid fake files in {fake_path}")
+                all_files.extend([(f, 1) for f in validate_fake])  # 1 for fake
             
             real_path = os.path.join(data_dir, subdir, split, 'real')
             if os.path.exists(real_path):
@@ -33,10 +47,16 @@ def loadfiles(data_dir, target_splits):
                 for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
                     real_files.extend(glob.glob(os.path.join(real_path, ext)))
                 
-                print(f"Found {len(real_files)} real files in {real_path}")
-                all_files.extend([(f, 0) for f in real_files])  # 0 for real
+                # Validate files before adding
+                valid_real_files = []
+                for f in real_files:
+                    if os.path.isfile(f) and validatefile(f):
+                        valid_real_files.append(f)
+                
+                print(f"Found {len(valid_real_files)}/{len(real_files)} valid real files in {real_path}")
+                all_files.extend([(f, 0) for f in valid_real_files])  # 0 for real
     
-    print(f"Total files loaded from {target_splits}: {len(all_files)}")
+    print(f"Total valid files loaded from {target_splits}: {len(all_files)}")
     if len(all_files) > 0:
         fake_count = sum(1 for _, label in all_files if label == 1)
         real_count = sum(1 for _, label in all_files if label == 0)
@@ -55,12 +75,33 @@ class DatasetFolder(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.data[idx]
-        audioArr, sr = librosa.load(path, sr=16000)
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                audioArr, sr = librosa.load(path, sr=16000)
+                break
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    print(f"Failed to load {path} after {max_retries} attempts: {e}")
+                    # Silent audio array is fallback
+                    audioArr = np.zeros(16000, dtype=np.float32)
+                    sr = 16000
+                else:
+                    continue
 
         if self.augment_flag:
             audioArr = self.augmentAudio(audioArr)
 
-        x_raw, x_fft, x_wav = prepInputArray(audioArr)
+        try:
+            x_raw, x_fft, x_wav = prepInputArray(audioArr)
+        except Exception as e:
+            print(f"Error preprocessing {path}: {e}")
+            # Zero arrays as fallback
+            x_raw = np.zeros((1, 16000), dtype=np.float32)
+            x_fft = np.zeros((1, 128, 128), dtype=np.float32)
+            x_wav = np.zeros((1, 64, 128), dtype=np.float32)
+            
         return (
             torch.tensor(x_raw, dtype=torch.float32),
             torch.tensor(x_fft, dtype=torch.float32),
@@ -93,36 +134,63 @@ def collate_fn(batch):
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
     audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
-    x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
+    
+    # Edge case if audio all 0
+    if np.std(audioArr) == 0:
+        x_raw = audioArr.astype(np.float32)
+    else:
+        x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
     x_raw = np.expand_dims(x_raw, axis=0).astype(np.float32)
 
-    stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
-    mag = np.abs(stft)
-    mag = mag[:128, :128]
-    mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
-    x_fft = np.expand_dims(mag, axis=0).astype(np.float32)
+    try:
+        stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
+        mag = np.abs(stft)
+        mag = mag[:128, :128]
+        if np.std(mag) == 0:
+            x_fft = mag.astype(np.float32)
+        else:
+            x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
+        x_fft = np.expand_dims(x_fft, axis=0).astype(np.float32)
+    except Exception as e:
+        print(f"Error in STFT computation: {e}")
+        x_fft = np.zeros((1, 128, 128), dtype=np.float32)
 
-    coeffs = pywt.wavedec(audioArr, 'db4', level=4)
-    cA4 = coeffs[0]
-    cA4_resized = np.resize(cA4, (64, 128))
-    cA4_resized = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
-    x_wav = np.expand_dims(cA4_resized, axis=0).astype(np.float32)
+    try:
+        coeffs = pywt.wavedec(audioArr, 'db4', level=4)
+        cA4 = coeffs[0]
+        cA4_resized = np.resize(cA4, (64, 128))
+        if np.std(cA4_resized) == 0:
+            x_wav = cA4_resized.astype(np.float32)
+        else:
+            x_wav = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
+        x_wav = np.expand_dims(x_wav, axis=0).astype(np.float32)
+    except Exception as e:
+        print(f"Error in wavelet computation: {e}")
+        x_wav = np.zeros((1, 64, 128), dtype=np.float32)
 
     return x_raw, x_fft, x_wav
 
 def train_1epoch(model, dataloader, criterion, optimizer, device):
     model.train()
     running_loss = 0
+    valid_batches = 0
+    
     for x_raw, x_fft, x_wav, y in dataloader:
-        x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-        optimizer.zero_grad()
-        output = model(x_raw, x_fft, x_wav)
-        loss = criterion(output, y)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        running_loss += loss.item() * y.size(0)
-    return running_loss / len(dataloader.dataset)
+        try:
+            x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
+            optimizer.zero_grad()
+            output = model(x_raw, x_fft, x_wav)
+            loss = criterion(output, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            running_loss += loss.item() * y.size(0)
+            valid_batches += y.size(0)
+        except Exception as e:
+            print(f"Error in training batch: {e}")
+            continue
+    
+    return running_loss / max(valid_batches, 1)
 
 def evaluate(model, dataloader, device):
     model.eval()
@@ -130,11 +198,18 @@ def evaluate(model, dataloader, device):
     all_labels = []
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in dataloader:
-            x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-            logits = model(x_raw, x_fft, x_wav)
-            probs = torch.sigmoid(logits)
-            all_preds.append(probs.cpu())
-            all_labels.append(y.cpu())
+            try:
+                x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
+                logits = model(x_raw, x_fft, x_wav)
+                probs = torch.sigmoid(logits)
+                all_preds.append(probs.cpu())
+                all_labels.append(y.cpu())
+            except Exception as e:
+                print(f"Error in evaluation batch: {e}")
+                continue
+    
+    if len(all_preds) == 0:
+        return 0.0, float('nan'), np.array([]), np.array([])
     
     all_preds = torch.cat(all_preds).numpy()
     all_labels = torch.cat(all_labels).numpy()
@@ -148,6 +223,9 @@ def evaluate(model, dataloader, device):
     return acc, auc, all_labels, pred_labels
 
 def main():
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore", category=UserWarning)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
@@ -155,33 +233,32 @@ def main():
     try:
         data_dir = "/kaggle/input/the-fake-or-real-dataset"
         
-        print("\n Loading Training Data")
+        print("\nLoading Training Data")
         train_files = loadfiles(data_dir, ['training'])
         
         print("\nLoading Testing Data") 
-        val_test_files = loadfiles(data_dir, ['testing', 'validation'])
+        validationfiles = loadfiles(data_dir, ['testing', 'validation'])
         
         if len(train_files) == 0:
-            print("No training files found.")
+            print("No valid training files found.")
             return
             
-        if len(val_test_files) == 0:
-            print("No validation or test files found.")
+        if len(validationfiles) == 0:
+            print("No valid validation or test files found.")
             return
         
-        # Check class distribution for training data
+        # Check class distribution for training then test data
         train_labels = [label for _, label in train_files]
         train_label_counts = Counter(train_labels)
         print(f"\nTraining dataset size: {len(train_files)}")
         print(f"Training class distribution: {train_label_counts}")
         
-        # Check class distribution for validation/test data
-        val_test_labels = [label for _, label in val_test_files]
-        val_test_label_counts = Counter(val_test_labels)
-        print(f"Validation/Test dataset size: {len(val_test_files)}")
-        print(f"Validation/Test class distribution: {val_test_label_counts}")
+        validationlabels = [label for _, label in validationfiles]
+        validationlabels_counts  = Counter(validationlabels)
+        print(f"Validation dataset size: {len(validationfiles)}")
+        print(f"Validation class distribution: {validationlabels_counts}")
         
-        if len(train_label_counts) < 2 or len(val_test_label_counts) < 2:
+        if len(train_label_counts) < 2 or len(validationlabels_counts) < 2:
             print("Error: fake or real data set not found")
             return
             
@@ -195,14 +272,16 @@ def main():
     try:
         # Create datasets
         train_ds = DatasetFolder(train_files, augment=True)
-        val_test_ds = DatasetFolder(val_test_files, augment=False)
+        val_test_ds = DatasetFolder(validationfiles, augment=False)
 
-        # Increased batch size - adjust based on your GPU memory
-        batch_size = 16  # Increased from 2 to 16
-        print(f"Using batch size: {batch_size}")
+        batch_size = 8  
+        print(f"Batch size: {batch_size}")
         
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=2)
-        val_test_loader = DataLoader(val_test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=2)
+        # num_workers 0 to avoid multiprocessing issues with corrupted files
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
+                                collate_fn=collate_fn, num_workers=0, pin_memory=True)
+        val_test_loader = DataLoader(val_test_ds, batch_size=batch_size, shuffle=False, 
+                                   collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
         model = MultiCNN().to(device)
         print(f"Model loaded successfully")
@@ -221,17 +300,23 @@ def main():
             print(f"Starting epoch {epoch + 1}/{epochs}...")
             train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
 
-            # Validation on the separate validation/test set
+            # Validation on test set
             model.eval()
             val_loss = 0
+            valid_samples = 0
             with torch.no_grad():
                 for x_raw, x_fft, x_wav, y in val_test_loader:
-                    x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-                    outputs = model(x_raw, x_fft, x_wav)
-                    loss = criterion(outputs, y)
-                    val_loss += loss.item() * y.size(0)
-            val_loss /= len(val_test_loader.dataset)
-
+                    try:
+                        x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
+                        outputs = model(x_raw, x_fft, x_wav)
+                        loss = criterion(outputs, y)
+                        val_loss += loss.item() * y.size(0)
+                        valid_samples += y.size(0)
+                    except Exception as e:
+                        print(f"Error in validation batch: {e}")
+                        continue
+            
+            val_loss = val_loss / max(valid_samples, 1)
             val_acc, val_auc, _, _ = evaluate(model, val_test_loader, device)
 
             print(f"Epoch {epoch + 1}/{epochs}")
@@ -260,8 +345,12 @@ def main():
 
         print(f"Test Accuracy: {acc:.4f}")
         print(f"Test ROC AUC: {auc:.4f}")
-        print("\nDetailed Classification Report:")
-        print(classification_report(true_labels, pred_labels, target_names=['Real', 'Fake']))
+        
+        if len(true_labels) > 0 and len(pred_labels) > 0:
+            print("\nDetailed Classification Report:")
+            print(classification_report(true_labels, pred_labels, target_names=['Real', 'Fake']))
+        else:
+            print("No valid predictions to evaluate.")
 
     except Exception as e:
         print(f"Error during training: {e}")
