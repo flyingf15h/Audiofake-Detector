@@ -8,15 +8,40 @@ import librosa
 import pywt
 from model import MultiCNN
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
-from sklearn.model_selection import train_test_split
 from collections import Counter
 import random
 import glob
 
-def loadfiles(data_dir):
-    fake = glob.glob(os.path.join(data_dir, "fake", "*.wav"))
-    real = glob.glob(os.path.join(data_dir, "real", "*.wav"))
-    all_files = [(f, 1) for f in fake] + [(f, 0) for f in real]
+def loadfiles(data_dir, target_splits):
+    all_files = []
+    subdirs = ['for-2sec/for-2seconds', 'for-norm/for-norm', 'for-original/for-original', 'for-rerec/for-rerecorded']
+    
+    for subdir in subdirs:
+        for split in target_splits:
+            fake_path = os.path.join(data_dir, subdir, split, 'fake')
+            if os.path.exists(fake_path):
+                fake_files = []
+                for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
+                    fake_files.extend(glob.glob(os.path.join(fake_path, ext)))
+                
+                print(f"Found {len(fake_files)} fake files in {fake_path}")
+                all_files.extend([(f, 1) for f in fake_files])  # 1 for fake
+            
+            real_path = os.path.join(data_dir, subdir, split, 'real')
+            if os.path.exists(real_path):
+                real_files = []
+                for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
+                    real_files.extend(glob.glob(os.path.join(real_path, ext)))
+                
+                print(f"Found {len(real_files)} real files in {real_path}")
+                all_files.extend([(f, 0) for f in real_files])  # 0 for real
+    
+    print(f"Total files loaded from {target_splits}: {len(all_files)}")
+    if len(all_files) > 0:
+        fake_count = sum(1 for _, label in all_files if label == 1)
+        real_count = sum(1 for _, label in all_files if label == 0)
+        print(f"Fake files: {fake_count}, Real files: {real_count}")
+    
     random.shuffle(all_files)
     return all_files
 
@@ -129,25 +154,55 @@ def main():
     print("Loading dataset...")
     try:
         data_dir = "/kaggle/input/the-fake-or-real-dataset"
-        all_files = loadfiles(data_dir)
-        labels = [label for _, label in all_files]
-        label_counts = Counter(labels)
-        print(f"Dataset size: {len(all_files)}")
-        print(f"Class distribution: {label_counts}")
-        pos_weight = label_counts[0] / label_counts[1] if label_counts[1] > 0 else 1.0
+        
+        print("\n Loading Training Data")
+        train_files = loadfiles(data_dir, ['training'])
+        
+        print("\nLoading Testing Data") 
+        val_test_files = loadfiles(data_dir, ['testing', 'validation'])
+        
+        if len(train_files) == 0:
+            print("No training files found.")
+            return
+            
+        if len(val_test_files) == 0:
+            print("No validation or test files found.")
+            return
+        
+        # Check class distribution for training data
+        train_labels = [label for _, label in train_files]
+        train_label_counts = Counter(train_labels)
+        print(f"\nTraining dataset size: {len(train_files)}")
+        print(f"Training class distribution: {train_label_counts}")
+        
+        # Check class distribution for validation/test data
+        val_test_labels = [label for _, label in val_test_files]
+        val_test_label_counts = Counter(val_test_labels)
+        print(f"Validation/Test dataset size: {len(val_test_files)}")
+        print(f"Validation/Test class distribution: {val_test_label_counts}")
+        
+        if len(train_label_counts) < 2 or len(val_test_label_counts) < 2:
+            print("Error: fake or real data set not found")
+            return
+            
+        pos_weight = train_label_counts[0] / train_label_counts[1] if train_label_counts[1] > 0 else 1.0
         print(f"Positive weight (for class 1): {pos_weight:.2f}")
+        
     except Exception as e:
         print(f"Error loading dataset: {e}")
         return
 
     try:
-        train_pairs, test_pairs = train_test_split(all_files, test_size=0.2, stratify=labels, random_state=42)
-        train_ds = DatasetFolder(train_pairs, augment=True)
-        test_ds = DatasetFolder(test_pairs, augment=False)
+        # Create datasets
+        train_ds = DatasetFolder(train_files, augment=True)
+        val_test_ds = DatasetFolder(val_test_files, augment=False)
 
-        batch_size = 2
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-        test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+        # Increased batch size - adjust based on your GPU memory
+        batch_size = 16  # Increased from 2 to 16
+        print(f"Using batch size: {batch_size}")
+        
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=2)
+        val_test_loader = DataLoader(val_test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=2)
 
         model = MultiCNN().to(device)
         print(f"Model loaded successfully")
@@ -158,7 +213,7 @@ def main():
 
         best_loss = float('inf')
         patience = 10
-        epochs_noImprove = 6
+        epochs_noImprove = 0
         epochs = 109
 
         print(f"\nStarting training for {epochs} epochs...")
@@ -166,17 +221,18 @@ def main():
             print(f"Starting epoch {epoch + 1}/{epochs}...")
             train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
 
+            # Validation on the separate validation/test set
             model.eval()
             val_loss = 0
             with torch.no_grad():
-                for x_raw, x_fft, x_wav, y in test_loader:
+                for x_raw, x_fft, x_wav, y in val_test_loader:
                     x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
                     outputs = model(x_raw, x_fft, x_wav)
                     loss = criterion(outputs, y)
                     val_loss += loss.item() * y.size(0)
-            val_loss /= len(test_loader.dataset)
+            val_loss /= len(val_test_loader.dataset)
 
-            val_acc, val_auc, _, _ = evaluate(model, test_loader, device)
+            val_acc, val_auc, _, _ = evaluate(model, val_test_loader, device)
 
             print(f"Epoch {epoch + 1}/{epochs}")
             print(f"  Train Loss: {train_loss:.4f}")
@@ -196,11 +252,11 @@ def main():
                     break
 
         print("\n" + "="*50)
-        print("Evaluation")
+        print("Final Evaluation")
         print("="*50)
         
         model.load_state_dict(torch.load("best_model.pth"))
-        acc, auc, true_labels, pred_labels = evaluate(model, test_loader, device)
+        acc, auc, true_labels, pred_labels = evaluate(model, val_test_loader, device)
 
         print(f"Test Accuracy: {acc:.4f}")
         print(f"Test ROC AUC: {auc:.4f}")
