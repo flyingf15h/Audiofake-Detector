@@ -13,10 +13,23 @@ from collections import Counter
 import random
 import glob
 
-def loadfiles(data_dir):
-    fake = glob.glob(os.path.join(data_dir, "fake", "*.wav"))
-    real = glob.glob(os.path.join(data_dir, "real", "*.wav"))
-    all_files = [(f, 1) for f in fake] + [(f, 0) for f in real]
+def loadfiles(data_dir, subsets=["for-norm", "for-rerec"]):
+    all_files = []
+
+    for subset in subsets:
+        subset_path = os.path.join(data_dir, subset)
+        wav_files = glob.glob(os.path.join(subset_path, "*.wav"))
+
+        for path in wav_files:
+            name = os.path.basename(path).lower()
+            if "fake" in name:
+                label = 1
+            elif "real" in name:
+                label = 0
+            else:
+                continue
+            all_files.append((path, label))
+
     random.shuffle(all_files)
     return all_files
 
@@ -129,7 +142,7 @@ def main():
     print("Loading dataset...")
     try:
         data_dir = "/kaggle/input/the-fake-or-real-dataset"
-        all_files = loadfiles(data_dir)
+        all_files = loadfiles(data_dir, subsets=["for-norm", "for-rerec"])
         labels = [label for _, label in all_files]
         label_counts = Counter(labels)
         print(f"Dataset size: {len(all_files)}")
