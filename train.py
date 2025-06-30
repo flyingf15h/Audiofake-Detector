@@ -13,14 +13,6 @@ import random
 import glob
 import warnings
 
-def validatefile(file_path):
-    try:
-        _, _ = librosa.load(file_path, sr=16000, duration=0.1)
-        return True
-    except Exception as e:
-        print(f"Skipping corrupted file: {file_path} - Error: {str(e)}")
-        return False
-
 def loadfiles(data_dir, target_splits):
     all_files = []
     subdirs = ['for-2sec/for-2seconds', 'for-norm/for-norm', 'for-original/for-original', 'for-rerec/for-rerecorded']
@@ -33,13 +25,8 @@ def loadfiles(data_dir, target_splits):
                 for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
                     fake_files.extend(glob.glob(os.path.join(fake_path, ext)))
                 
-                validate_fake = []
-                for f in fake_files:
-                    if os.path.isfile(f) and validatefile(f):
-                        validate_fake.append(f)
-                
-                print(f"Found {len(validate_fake)}/{len(fake_files)} valid fake files in {fake_path}")
-                all_files.extend([(f, 1) for f in validate_fake])  # 1 for fake
+                print(f"Found {len(fake_files)} fake files in {fake_path}")
+                all_files.extend([(f, 1) for f in fake_files])  # 1 for fake
             
             real_path = os.path.join(data_dir, subdir, split, 'real')
             if os.path.exists(real_path):
@@ -47,16 +34,10 @@ def loadfiles(data_dir, target_splits):
                 for ext in ['*.wav', '*.mp3', '*.flac', '*.m4a']:
                     real_files.extend(glob.glob(os.path.join(real_path, ext)))
                 
-                # Validate files before adding
-                valid_real_files = []
-                for f in real_files:
-                    if os.path.isfile(f) and validatefile(f):
-                        valid_real_files.append(f)
-                
-                print(f"Found {len(valid_real_files)}/{len(real_files)} valid real files in {real_path}")
-                all_files.extend([(f, 0) for f in valid_real_files])  # 0 for real
+                print(f"Found {len(real_files)} real files in {real_path}")
+                all_files.extend([(f, 0) for f in real_files])  # 0 for real
     
-    print(f"Total valid files loaded from {target_splits}: {len(all_files)}")
+    print(f"Total files loaded from {target_splits}: {len(all_files)}")
     if len(all_files) > 0:
         fake_count = sum(1 for _, label in all_files if label == 1)
         real_count = sum(1 for _, label in all_files if label == 0)
@@ -69,6 +50,7 @@ class DatasetFolder(Dataset):
     def __init__(self, file_label_pairs, augment=False):
         self.data = file_label_pairs
         self.augment_flag = augment
+        self.failed_files = set()  # Track failed files to avoid repeated warnings
 
     def __len__(self):
         return len(self.data)
@@ -76,28 +58,30 @@ class DatasetFolder(Dataset):
     def __getitem__(self, idx):
         path, label = self.data[idx]
         
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                audioArr, sr = librosa.load(path, sr=16000)
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"Failed to load {path} after {max_retries} attempts: {e}")
-                    # Silent audio array is fallback
-                    audioArr = np.zeros(16000, dtype=np.float32)
-                    sr = 16000
-                else:
-                    continue
+        # Load audio with robust error handling
+        try:
+            audioArr, sr = librosa.load(path, sr=16000)
+            # Check if audio was loaded successfully
+            if audioArr is None or len(audioArr) == 0:
+                raise ValueError("Empty audio array")
+        except Exception as e:
+            # Only print warning once per file
+            if path not in self.failed_files:
+                print(f"Failed to load {path}: {e}")
+                self.failed_files.add(path)
+            # Return a silent audio array as fallback
+            audioArr = np.zeros(16000, dtype=np.float32)
 
-        if self.augment_flag:
+        if self.augment_flag and audioArr is not None:
             audioArr = self.augmentAudio(audioArr)
 
         try:
             x_raw, x_fft, x_wav = prepInputArray(audioArr)
         except Exception as e:
-            print(f"Error preprocessing {path}: {e}")
-            # Zero arrays as fallback
+            if path not in self.failed_files:
+                print(f"Error preprocessing {path}: {e}")
+                self.failed_files.add(path)
+            # Return zero arrays as fallback
             x_raw = np.zeros((1, 16000), dtype=np.float32)
             x_fft = np.zeros((1, 128, 128), dtype=np.float32)
             x_wav = np.zeros((1, 64, 128), dtype=np.float32)
@@ -110,17 +94,21 @@ class DatasetFolder(Dataset):
         )
 
     def augmentAudio(self, audio):  
-        if random.random() < 0.3:
-            shift = random.randint(-1600, 1600) 
-            audio = np.roll(audio, shift)
-        
-        if random.random() < 0.3:
-            scale = random.uniform(0.8, 1.2)
-            audio = audio * scale
-        
-        if random.random() < 0.2:
-            noise = np.random.normal(0, 0.005, audio.shape)
-            audio = audio + noise
+        try:
+            if random.random() < 0.3:
+                shift = random.randint(-1600, 1600) 
+                audio = np.roll(audio, shift)
+            
+            if random.random() < 0.3:
+                scale = random.uniform(0.8, 1.2)
+                audio = audio * scale
+            
+            if random.random() < 0.2:
+                noise = np.random.normal(0, 0.005, audio.shape)
+                audio = audio + noise
+        except Exception:
+            # If augmentation fails, return original audio
+            pass
             
         return audio
 
@@ -133,9 +121,13 @@ def collate_fn(batch):
     return x_raw, x_fft, x_wav, y
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
+    # Ensure we have a valid audio array
+    if audioArr is None or len(audioArr) == 0:
+        audioArr = np.zeros(fixed_length, dtype=np.float32)
+    
     audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
     
-    # Edge case if audio all 0
+    # Handle edge case where audio might be all zeros
     if np.std(audioArr) == 0:
         x_raw = audioArr.astype(np.float32)
     else:
@@ -151,8 +143,7 @@ def prepInputArray(audioArr, sr=16000, fixed_length=16000):
         else:
             x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
         x_fft = np.expand_dims(x_fft, axis=0).astype(np.float32)
-    except Exception as e:
-        print(f"Error in STFT computation: {e}")
+    except Exception:
         x_fft = np.zeros((1, 128, 128), dtype=np.float32)
 
     try:
@@ -164,8 +155,7 @@ def prepInputArray(audioArr, sr=16000, fixed_length=16000):
         else:
             x_wav = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
         x_wav = np.expand_dims(x_wav, axis=0).astype(np.float32)
-    except Exception as e:
-        print(f"Error in wavelet computation: {e}")
+    except Exception:
         x_wav = np.zeros((1, 64, 128), dtype=np.float32)
 
     return x_raw, x_fft, x_wav
@@ -175,7 +165,7 @@ def train_1epoch(model, dataloader, criterion, optimizer, device):
     running_loss = 0
     valid_batches = 0
     
-    for x_raw, x_fft, x_wav, y in dataloader:
+    for batch_idx, (x_raw, x_fft, x_wav, y) in enumerate(dataloader):
         try:
             x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
             optimizer.zero_grad()
@@ -187,8 +177,12 @@ def train_1epoch(model, dataloader, criterion, optimizer, device):
             running_loss += loss.item() * y.size(0)
             valid_batches += y.size(0)
         except Exception as e:
-            print(f"Error in training batch: {e}")
+            print(f"Error in training batch {batch_idx}: {e}")
             continue
+        
+        # Print progress every 1000 batches
+        if batch_idx % 1000 == 0:
+            print(f"  Batch {batch_idx}/{len(dataloader)}")
     
     return running_loss / max(valid_batches, 1)
 
@@ -197,7 +191,7 @@ def evaluate(model, dataloader, device):
     all_preds = []
     all_labels = []
     with torch.no_grad():
-        for x_raw, x_fft, x_wav, y in dataloader:
+        for batch_idx, (x_raw, x_fft, x_wav, y) in enumerate(dataloader):
             try:
                 x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
                 logits = model(x_raw, x_fft, x_wav)
@@ -205,7 +199,7 @@ def evaluate(model, dataloader, device):
                 all_preds.append(probs.cpu())
                 all_labels.append(y.cpu())
             except Exception as e:
-                print(f"Error in evaluation batch: {e}")
+                print(f"Error in evaluation batch {batch_idx}: {e}")
                 continue
     
     if len(all_preds) == 0:
@@ -223,6 +217,7 @@ def evaluate(model, dataloader, device):
     return acc, auc, all_labels, pred_labels
 
 def main():
+    # Suppress warnings for cleaner output
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=UserWarning)
     
@@ -237,28 +232,29 @@ def main():
         train_files = loadfiles(data_dir, ['training'])
         
         print("\nLoading Testing Data") 
-        validationfiles = loadfiles(data_dir, ['testing', 'validation'])
+        val_test_files = loadfiles(data_dir, ['testing', 'validation'])
         
         if len(train_files) == 0:
-            print("No valid training files found.")
+            print("No training files found.")
             return
             
-        if len(validationfiles) == 0:
-            print("No valid validation or test files found.")
+        if len(val_test_files) == 0:
+            print("No validation or test files found.")
             return
         
-        # Check class distribution for training then test data
+        # Check class distribution for training data
         train_labels = [label for _, label in train_files]
         train_label_counts = Counter(train_labels)
         print(f"\nTraining dataset size: {len(train_files)}")
         print(f"Training class distribution: {train_label_counts}")
         
-        validationlabels = [label for _, label in validationfiles]
-        validationlabels_counts  = Counter(validationlabels)
-        print(f"Validation dataset size: {len(validationfiles)}")
-        print(f"Validation class distribution: {validationlabels_counts}")
+        # Check class distribution for validation/test data
+        val_test_labels = [label for _, label in val_test_files]
+        val_test_label_counts = Counter(val_test_labels)
+        print(f"Validation/Test dataset size: {len(val_test_files)}")
+        print(f"Validation/Test class distribution: {val_test_label_counts}")
         
-        if len(train_label_counts) < 2 or len(validationlabels_counts) < 2:
+        if len(train_label_counts) < 2 or len(val_test_label_counts) < 2:
             print("Error: fake or real data set not found")
             return
             
@@ -270,19 +266,19 @@ def main():
         return
 
     try:
-        # Create datasets
+        print("\nCreating datasets...")
         train_ds = DatasetFolder(train_files, augment=True)
-        val_test_ds = DatasetFolder(validationfiles, augment=False)
-
-        batch_size = 8  
-        print(f"Batch size: {batch_size}")
+        val_test_ds = DatasetFolder(val_test_files, augment=False)
+        batch_size = 16
+        print(f"Using batch size: {batch_size}")
         
-        # num_workers 0 to avoid multiprocessing issues with corrupted files
+        # Set num_workers to 0 to avoid multiprocessing issues
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
                                 collate_fn=collate_fn, num_workers=0, pin_memory=True)
         val_test_loader = DataLoader(val_test_ds, batch_size=batch_size, shuffle=False, 
                                    collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
+        print("Loading model...")
         model = MultiCNN().to(device)
         print(f"Model loaded successfully")
 
@@ -297,10 +293,11 @@ def main():
 
         print(f"\nStarting training for {epochs} epochs...")
         for epoch in range(epochs):
-            print(f"Starting epoch {epoch + 1}/{epochs}...")
+            print(f"\nEpoch {epoch + 1}/{epochs}")
             train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
 
-            # Validation on test set
+            # Validation on the separate validation/test set
+            print("Running validation...")
             model.eval()
             val_loss = 0
             valid_samples = 0
@@ -313,13 +310,12 @@ def main():
                         val_loss += loss.item() * y.size(0)
                         valid_samples += y.size(0)
                     except Exception as e:
-                        print(f"Error in validation batch: {e}")
                         continue
             
             val_loss = val_loss / max(valid_samples, 1)
             val_acc, val_auc, _, _ = evaluate(model, val_test_loader, device)
 
-            print(f"Epoch {epoch + 1}/{epochs}")
+            print(f"Epoch {epoch + 1}/{epochs} Results:")
             print(f"  Train Loss: {train_loss:.4f}")
             print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Val AUC: {val_auc:.4f}")
 
@@ -329,11 +325,11 @@ def main():
                 best_loss = val_loss
                 epochs_noImprove = 0
                 torch.save(model.state_dict(), "best_model.pth")
-                print(f"New best model saved")
+                print(f"  *** New best model saved ***")
             else:
                 epochs_noImprove += 1
                 if epochs_noImprove >= patience:
-                    print(f"\nEarly stopping triggered after {epoch + 1} epochs no improvement.")
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs with no improvement.")
                     break
 
         print("\n" + "="*50)
@@ -343,8 +339,8 @@ def main():
         model.load_state_dict(torch.load("best_model.pth"))
         acc, auc, true_labels, pred_labels = evaluate(model, val_test_loader, device)
 
-        print(f"Test Accuracy: {acc:.4f}")
-        print(f"Test ROC AUC: {auc:.4f}")
+        print(f"Final Test Accuracy: {acc:.4f}")
+        print(f"Final Test ROC AUC: {auc:.4f}")
         
         if len(true_labels) > 0 and len(pred_labels) > 0:
             print("\nDetailed Classification Report:")
