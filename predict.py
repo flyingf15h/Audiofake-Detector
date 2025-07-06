@@ -1,60 +1,181 @@
 import torch
-import numpy as np
 import librosa
-import pywt
-from model import MultiCNN
+import numpy as np
+from model import create_model, ThreeBranchDeepfakeDetector
+import torch.nn.functional as F
 
-def prepInputArray(audio_array, sr=16000, fixed_length=16000):
-    audio_array = librosa.util.fix_length(audio_array, size=fixed_length)
-
-    # Normalize
-    x_raw = (audio_array - np.mean(audio_array)) / (np.std(audio_array) + 1e-6)
-    x_raw = x_raw[np.newaxis, :]  # Shape: (1, 16000)
-
-    # Spectrogram
-    stft = librosa.stft(audio_array, n_fft=512, hop_length=256)
-    mag = np.abs(stft)
-    mag = mag[:128, :128]  
-    mag = (mag - np.mean(mag)) / (np.std(mag) + 1e-6)
-    x_fft = mag[np.newaxis, :, :]  # Shape: (1, 128, 128)
-
-    # Wavelet 
-    coeffs = pywt.wavedec(audio_array, 'db4', level=4)
-    cA4 = coeffs[0]
-    cA4_resized = np.resize(cA4, (64, 128))
-    cA4_resized = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-6)
-    x_wav = cA4_resized[np.newaxis, :, :]  # Shape: (1, 64, 128)
-
-    return x_raw.astype(np.float32), x_fft.astype(np.float32), x_wav.astype(np.float32)
-
-
-def predict(audio_path):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Load model audio preprocess
-    model = MultiCNN().to(device)
-    model.load_state_dict(torch.load("best_model.pth", map_location=device))
-    model.eval()
-
-    audio_array, _ = librosa.load(audio_path, sr=16000)
-    x_raw, x_fft, x_wav = prepInputArray(audio_array)
-
-    x_raw = torch.tensor(x_raw).unsqueeze(0).to(device)  # (1, 1, 16000)
-    x_fft = torch.tensor(x_fft).unsqueeze(0).to(device)  # (1, 1, 128, 128)
-    x_wav = torch.tensor(x_wav).unsqueeze(0).to(device)  # (1, 1, 64, 128)
-
-    with torch.no_grad():
-        prob = model(x_raw, x_fft, x_wav).item()
-        label = "Fake" if prob >= 0.5 else "Real"
-        print(f"Prediction: {label} (score: {prob:.4f})")
-
-def prepInputFile(path):
-    audio_array, _ = librosa.load(path, sr=16000)
-    return prepInputArray(audio_array)
+class AudioDeepfakeDetector:
+    # Predict other files
+    
+    def __init__(self, model_path, device='cuda', sample_rate=16000, duration=2.0):
+        self.device = device
+        self.sample_rate = sample_rate
+        self.duration = duration
+        self.input_length = int(sample_rate * duration)
+        
+        # Create model
+        self.model = create_model(
+            sample_rate=sample_rate,
+            input_length=self.input_length
+        )
+        
+        self.load_model(model_path)
+        self.model.eval()
+        
+    def load_model(self, model_path):
+        """Load trained model"""
+        try:
+            checkpoint = torch.load(model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.to(self.device)
+            print(f"Model loaded from {model_path}")
+        except Exception as e:
+            raise Exception(f"Error loading model: {e}")
+        
+    def preprocess_audio(self, audio_path):
+        try:
+            audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+            
+            # Split into overlapping chunks and pad to chunk size
+            chunk_size = self.input_length
+            chunks = []
+            
+            if len(audio) < chunk_size:
+                audio = np.pad(audio, (0, chunk_size - len(audio)))
+            
+            
+            stride = chunk_size // 2
+            for i in range(0, len(audio) - chunk_size + 1, stride):
+                chunk = audio[i:i + chunk_size]
+                chunks.append(chunk)
+            
+            if not chunks:
+                chunks = [audio[:chunk_size]]
+            
+            audio_tensor = torch.FloatTensor(np.array(chunks)).unsqueeze(1)  # (N, 1, T)
+            
+            return audio_tensor
+            
+        except Exception as e:
+            raise Exception(f"Error preprocessing audio: {e}")
+    
+    def predict_single_file(self, audio_path, return_probabilities=True):
+        """Predict if a single audio file is deepfake"""
+        try:
+            # Preprocess
+            audio_tensor = self.preprocess_audio(audio_path)
+            audio_tensor = audio_tensor.to(self.device)
+            
+            # Predict in batches to avoid memory issues
+            batch_size = 8
+            all_outputs = []
+            
+            with torch.no_grad():
+                for i in range(0, len(audio_tensor), batch_size):
+                    batch = audio_tensor[i:i + batch_size]
+                    outputs = self.model(batch)
+                    all_outputs.append(outputs)
+            
+            # Concatenate all outputs
+            outputs = torch.cat(all_outputs, dim=0)
+            probabilities = torch.softmax(outputs, dim=1)
+            predictions = torch.argmax(outputs, dim=1)
+            
+            # Aggregate predictions (majority vote and average probabilities)
+            chunk_predictions = predictions.cpu().numpy()
+            chunk_probabilities = probabilities.cpu().numpy()
+            
+            # Final prediction based on average probabilities
+            avg_probs = np.mean(chunk_probabilities, axis=0)
+            final_prediction = np.argmax(avg_probs)
+            final_confidence = avg_probs[final_prediction]
+            
+            result = {
+                'prediction': 'AI Generated' if final_prediction == 1 else 'Real',
+                'confidence': float(final_confidence),
+                'label': int(final_prediction),
+                'num_chunks': len(chunk_predictions),
+                'chunk_predictions': chunk_predictions.tolist(),
+                'chunk_probabilities': chunk_probabilities.tolist()
+            }
+            
+            if return_probabilities:
+                result['real_probability'] = float(avg_probs[0])
+                result['fake_probability'] = float(avg_probs[1])
+            
+            return result
+            
+        except Exception as e:
+            return {'error': str(e)}
+    
+    def predict_batch(self, audio_paths):
+        """Predict multiple audio files"""
+        results = []
+        for audio_path in audio_paths:
+            result = self.predict_single_file(audio_path)
+            result['file_path'] = audio_path
+            results.append(result)
+        return results
+    
+    def analyze_audio(self, audio_path):
+        """Detailed analysis of audio file"""
+        try:
+            # Get basic prediction
+            result = self.predict_single_file(audio_path)
+            
+            if 'error' in result:
+                return result
+            
+            # Get branch-specific features
+            audio_tensor = self.preprocess_audio(audio_path)
+            audio_tensor = audio_tensor.to(self.device)
+            
+            # Take first chunk for analysis
+            sample_chunk = audio_tensor[:1]
+            
+            with torch.no_grad():
+                branch_features = self.model.get_branch_features(sample_chunk)
+            
+            # Calculate feature statistics
+            analysis = {
+                'file_path': audio_path,
+                'prediction': result,
+                'branch_analysis': {
+                    'spectrogram_features': {
+                        'mean': float(torch.mean(branch_features['spectrogram'])),
+                        'std': float(torch.std(branch_features['spectrogram'])),
+                        'max': float(torch.max(branch_features['spectrogram'])),
+                        'min': float(torch.min(branch_features['spectrogram']))
+                    },
+                    'wavelet_features': {
+                        'mean': float(torch.mean(branch_features['wavelet'])),
+                        'std': float(torch.std(branch_features['wavelet'])),
+                        'max': float(torch.max(branch_features['wavelet'])),
+                        'min': float(torch.min(branch_features['wavelet']))
+                    },
+                    'raw_features': {
+                        'mean': float(torch.mean(branch_features['raw'])),
+                        'std': float(torch.std(branch_features['raw'])),
+                        'max': float(torch.max(branch_features['raw'])),
+                        'min': float(torch.min(branch_features['raw']))
+                    }
+                }
+            }
+            
+            return analysis
+            
+        except Exception as e:
+            return {'error': str(e)}
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Usage: python predict.py path_to_audio.wav")
-    else:
-        predict(sys.argv[1])
+    # Example usage
+    detector = AudioDeepfakeDetector(
+        model_path='./checkpoints/best_model.pt',
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    )
+    
+    # Test with a sample file
+    sample_file = input("Enter path to audio file for testing: ").strip()
+    if sample_file:
+        result = detector.predict_single_file(sample_file)
+        print(f"Result: {result}")
