@@ -208,7 +208,7 @@ def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=1e
         'history': history
     }, os.path.join(save_dir, 'final_model.pt'))
     
-    plot_training_history(history, save_dir)
+    plot_trainhist(history, save_dir)
     
     if use_wandb:
         wandb.finish()
@@ -216,7 +216,7 @@ def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=1e
     return model, history
 
 
-def plot_training_history(history, save_dir):
+def plot_trainhist(history, save_dir):
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     
     # Loss
@@ -255,7 +255,7 @@ def plot_training_history(history, save_dir):
     plt.close()
 
 
-def evaluate_model(model, test_loader, device='cuda', save_dir='./results'):
+def evaluate(model, test_loader, device='cuda', save_dir='./results'):
     model.eval()
     all_predictions = []
     all_labels = []

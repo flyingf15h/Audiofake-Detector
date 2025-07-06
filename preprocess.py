@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,7 +25,6 @@ class AudioDataset(Dataset):
         self.chunks = self._build_chunks()
     
     def _build_chunks(self):
-        """Build audio chunks from files"""
         chunks = []
         for i, (audio_path, label) in enumerate(zip(self.audio_paths, self.labels)):
             try:

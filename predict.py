@@ -23,7 +23,6 @@ class AudioDeepfakeDetector:
         self.model.eval()
         
     def load_model(self, model_path):
-        """Load trained model"""
         try:
             checkpoint = torch.load(model_path, map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -43,7 +42,7 @@ class AudioDeepfakeDetector:
             if len(audio) < chunk_size:
                 audio = np.pad(audio, (0, chunk_size - len(audio)))
             
-            
+
             stride = chunk_size // 2
             for i in range(0, len(audio) - chunk_size + 1, stride):
                 chunk = audio[i:i + chunk_size]
@@ -60,7 +59,6 @@ class AudioDeepfakeDetector:
             raise Exception(f"Error preprocessing audio: {e}")
     
     def predict_single_file(self, audio_path, return_probabilities=True):
-        """Predict if a single audio file is deepfake"""
         try:
             # Preprocess
             audio_tensor = self.preprocess_audio(audio_path)
@@ -118,7 +116,6 @@ class AudioDeepfakeDetector:
         return results
     
     def analyze_audio(self, audio_path):
-        """Detailed analysis of audio file"""
         try:
             # Get basic prediction
             result = self.predict_single_file(audio_path)
@@ -166,16 +163,3 @@ class AudioDeepfakeDetector:
             
         except Exception as e:
             return {'error': str(e)}
-
-if __name__ == "__main__":
-    # Example usage
-    detector = AudioDeepfakeDetector(
-        model_path='./checkpoints/best_model.pt',
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    
-    # Test with a sample file
-    sample_file = input("Enter path to audio file for testing: ").strip()
-    if sample_file:
-        result = detector.predict_single_file(sample_file)
-        print(f"Result: {result}")

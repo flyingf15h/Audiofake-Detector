@@ -24,8 +24,8 @@ class PatchEmbed(nn.Module):
         return x
 
 
-class MultiHeadAttention(nn.Module):
-    # Multi-head attention mechanism
+class MultihAttention(nn.Module):
+    # Multi head attention mechanism
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
@@ -53,11 +53,11 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    # Multi-head attention and MLP
+    # Multi head attention and MLP
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = MultiHeadAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, 
+        self.attn = MultihAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, 
                                      attn_drop=attn_drop, proj_drop=drop)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -107,20 +107,15 @@ class AST(nn.Module):
 
 
 class WaveletTransform(nn.Module):
-    """Wavelet packet transform for audio"""
     def __init__(self, wavelet='db4', max_level=5):
         super().__init__()
         self.wavelet = wavelet
         self.max_level = max_level
         
     def forward(self, x):
-        """
-        Apply wavelet packet transform to audio
-        Args:
-            x: Input audio tensor (B, 1, T)
-        Returns:
-            Wavelet coefficients arranged as 2D tensor (B, 1, H, W)
-        """
+        # Applies wavelet packet transform to audio
+        # Args x = Input audio tensor (B, 1, T)
+        # Returns wavelet coefficients arranged as 2D tensor (B, 1, H, W)
         batch_size = x.shape[0]
         wavelets = []
         
@@ -148,7 +143,7 @@ class WaveletTransform(nn.Module):
         return wavelets.to(x.device)
 
 
-class RawWaveformCNN(nn.Module):
+class RawCNN(nn.Module):
     def __init__(self, input_length=16000, num_classes=2):
         super().__init__()
         
@@ -230,7 +225,7 @@ class AttentionFusion(nn.Module):
             nn.Linear(dim, hidden_dim) for dim in feature_dims
         ])
         
-        self.attention = nn.MultiheadAttention(hidden_dim, num_heads=8, batch_first=True)
+        self.attention = nn.MultihAttention(hidden_dim, num_heads=8, batch_first=True)
         self.norm = nn.LayerNorm(hidden_dim)
         
     def forward(self, features):
@@ -291,7 +286,7 @@ class ThreeBranchDeepfakeDetector(nn.Module):
             num_heads=ast_num_heads
         )
         
-        self.cnn_raw = RawWaveformCNN(input_length=input_length)
+        self.cnn_raw = RawCNN(input_length=input_length)
         
         feature_dims = [ast_embed_dim, ast_embed_dim, self.cnn_raw.feature_dim]
         self.fusion = AttentionFusion(feature_dims, fusion_hidden_dim)
@@ -318,12 +313,9 @@ class ThreeBranchDeepfakeDetector(nn.Module):
         return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
     
     def forward(self, x):
-        """
-        Args:
-            x: Raw audio tensor (B, 1, T)
-        Returns:
-            Logits (B, num_classes)
-        """
+        # Args x = Raw audio tensor (B, 1, T)
+        # Returns Logits (B, num_classes)
+
         batch_size = x.shape[0]
         
         # Branch 1
@@ -347,7 +339,7 @@ class ThreeBranchDeepfakeDetector(nn.Module):
         
         return logits
     
-    def get_branch_features(self, x):
+    def getbranch_features(self, x):
         mel_spec = self.spectrogram_extractor(x)
         mel_spec_resized = self.resize_spectrogram(mel_spec)
         ast_spec_features = self.ast_spectrogram(mel_spec_resized)

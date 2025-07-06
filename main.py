@@ -8,8 +8,8 @@ import json
 import subprocess
 from torch.utils.data import DataLoader
 
-def download_kaggle_dataset():
-    print("Downloading 'the-fake-or-real-dataset' from Kaggle...")
+def downloadData1():
+    print("Downloading the-fake-or-real-dataset (Kaggle)...")
     os.makedirs('./data', exist_ok=True)
     try:
         subprocess.run([
@@ -43,7 +43,7 @@ def prepare_combined_dataset():
     
     # Download Kaggle dataset
     if not os.path.exists('./data/real') or not os.path.exists('./data/fake'):
-        download_kaggle_dataset()
+        downloadData1()
     
     # Combine datasets - copy MLAAD files to main data directory
     import shutil
