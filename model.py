@@ -116,50 +116,67 @@ class WaveletTransform(nn.Module):
         return wavelets.to(x.device)
 
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=kernel_size//2)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=kernel_size//2)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        
+        # Shortcut connection
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride),
+                nn.BatchNorm1d(out_channels)
+            )
+    
+    def forward(self, x):
+        residual = self.shortcut(x)
+        
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        
+        out += residual
+        out = F.relu(out)
+        
+        return out
+
+
 class RawCNN(nn.Module):
     def __init__(self, input_length=16000, num_classes=2):
         super().__init__()
         
-        # kernel to capture temporal patterns for first conv layer
+        # First conv layer to capture temporal patterns
         self.conv1 = nn.Conv1d(1, 64, kernel_size=80, stride=4, padding=38)
         self.bn1 = nn.BatchNorm1d(64)
         
         # Residual blocks
         self.res_blocks = nn.ModuleList([
-            self._make_res_block(64, 64, kernel_size=3, stride=1),
-            self._make_res_block(64, 128, kernel_size=3, stride=2),
-            self._make_res_block(128, 128, kernel_size=3, stride=1),
-            self._make_res_block(128, 256, kernel_size=3, stride=2),
-            self._make_res_block(256, 256, kernel_size=3, stride=1),
-            self._make_res_block(256, 512, kernel_size=3, stride=2),
+            ResidualBlock(64, 64, kernel_size=3, stride=1),
+            ResidualBlock(64, 128, kernel_size=3, stride=2),
+            ResidualBlock(128, 128, kernel_size=3, stride=1),
+            ResidualBlock(128, 256, kernel_size=3, stride=2),
+            ResidualBlock(256, 256, kernel_size=3, stride=1),
+            ResidualBlock(256, 512, kernel_size=3, stride=2),
         ])
         
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         self.feature_dim = 512
-        
-    def _make_res_block(self, in_channels, out_channels, kernel_size, stride):
-        # Residual block
-        return nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=kernel_size//2),
-            nn.BatchNorm1d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=kernel_size//2),
-            nn.BatchNorm1d(out_channels),
-            nn.ReLU(inplace=True)
-        )
     
     def forward(self, x):
         # Args x: Raw waveform (B, 1, T)
-        # Returns features (B, feature_dim) and x = F.relu(self.bn1(self.conv1(x)))
+        # Returns features (B, feature_dim)
         
-        # Add residual connection if dimensions match
+        # First conv layer
+        x = F.relu(self.bn1(self.conv1(x)))
+        
+        # Apply residual blocks
         for res_block in self.res_blocks:
-            residual = x
             x = res_block(x)
         
-            if residual.shape[1] == x.shape[1] and residual.shape[2] == x.shape[2]:
-                x = x + residual
-        
+        # Global pooling
         x = self.global_pool(x)
         x = x.squeeze(-1)  # (B, feature_dim)
         return x
@@ -319,4 +336,3 @@ def create_model(sample_rate=16000, input_length=16000, num_classes=2):
         fusion_hidden_dim=256
     )
     return model
-
