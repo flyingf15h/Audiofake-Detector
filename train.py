@@ -15,7 +15,7 @@ import warnings
 
 def loadfiles(data_dir, target_splits):
     all_files = []
-    subdirs = ['for-original/for-original', 'for-rerec/for-rerecorded']
+    subdirs = ['for-2sec/for-2sec', 'for-rerec/for-rerecorded']
     
     for subdir in subdirs:
         for split in target_splits:
