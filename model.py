@@ -205,8 +205,8 @@ class SpectrogramExtractor(nn.Module):
         )
         
     def forward(self, x):
-        # Args x: Raw audio (B, 1, T)
-        # Returns: Mel spectrogram (B, 1, n_mels, time_frames)
+        # Args x = Raw audio (B, 1, T)
+        # Returns Mel spectrogram (B, 1, n_mels, time_frames)
         
         x = x.squeeze(1)  # (B, T)
         mel_spec = self.mel_spectrogram(x)
@@ -229,32 +229,25 @@ class AttentionFusion(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
         
     def forward(self, features):
-        # Args features: List of feature tensors [(B, D1), (B, D2), (B, D3)]
-        # Returns Fused features (B, hidden_dim)
+        # Args features = List of feature tensors [(B, D1), (B, D2), (B, D3)]
+        # Returns fused features (B, hidden_dim)
     
-        # Project features to same dimension
+        # Project features to same dimension 
         projected_features = []
         for i, feat in enumerate(features):
             projected = self.projections[i](feat)
             projected_features.append(projected)
         
-        # Stack features for attention
         stacked_features = torch.stack(projected_features, dim=1)  # (B, 3, hidden_dim)
         attended_features, _ = self.attention(stacked_features, stacked_features, stacked_features)
         
-        # Global average pooling over the feature dimension
         fused_features = attended_features.mean(dim=1)  # (B, hidden_dim)
         fused_features = self.norm(fused_features)
         
         return fused_features
 
 
-class ThreeBranchDeepfakeDetector(nn.Module):
-    """
-    1. AST on mel spectrograms
-    2. AST on wavelet transforms  
-    3. CNN on raw waveform
-    """
+class TBranchDetector(nn.Module):
     def __init__(self, 
                  sample_rate=16000,
                  input_length=16000,
@@ -358,7 +351,7 @@ class ThreeBranchDeepfakeDetector(nn.Module):
 
 
 def create_model(sample_rate=16000, input_length=16000, num_classes=2):
-    model = ThreeBranchDeepfakeDetector(
+    model = TBranchDetector(
         sample_rate=sample_rate,
         input_length=input_length,
         num_classes=num_classes,

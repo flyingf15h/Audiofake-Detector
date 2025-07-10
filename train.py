@@ -6,7 +6,7 @@ import torch.optim as optim
 import numpy as np
 import librosa
 import pywt
-from model import MultiCNN
+from model import TBranchDetector
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 from collections import Counter
 import random
@@ -279,7 +279,7 @@ def main():
                                    collate_fn=collate_fn, num_workers=0, pin_memory=True)
 
         print("Loading model...")
-        model = MultiCNN().to(device)
+        model = TBranchDetector().to(device)
         print(f"Model loaded successfully")
 
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
