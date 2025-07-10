@@ -162,4 +162,4 @@ class AudioDeepfakeDetector:
             return analysis
             
         except Exception as e:
-            return {'error': str(e)}
+            return {'error': str(e)} 
