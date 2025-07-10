@@ -275,7 +275,7 @@ def main():
         print("\nCreating datasets...")
         train_ds = DatasetFolder(train_files, augment=True)
         val_test_ds = DatasetFolder(val_test_files, augment=False)
-        batch_size = 16
+        batch_size = 4
         print(f"Using batch size: {batch_size}")
         
         # Set num_workers to 0 to avoid multiprocessing issues
