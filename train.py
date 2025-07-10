@@ -90,7 +90,7 @@ class DatasetFolder(Dataset):
             torch.tensor(x_raw, dtype=torch.float32),
             torch.tensor(x_fft, dtype=torch.float32),
             torch.tensor(x_wav, dtype=torch.float32),
-            torch.tensor(label, dtype=torch.float32)
+            torch.tensor(label, dtype=torch.long)  # Changed to long for CrossEntropyLoss
         )
 
     def augmentAudio(self, audio):  
@@ -117,7 +117,7 @@ def collate_fn(batch):
     x_raw = torch.stack(raws)
     x_fft = torch.stack(ffts)
     x_wav = torch.stack(wavs)
-    y = torch.tensor(labels, dtype=torch.float32)
+    y = torch.tensor(labels, dtype=torch.long)  # Changed to long for CrossEntropyLoss
     return x_raw, x_fft, x_wav, y
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
@@ -195,7 +195,8 @@ def evaluate(model, dataloader, device):
             try:
                 x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
                 logits = model(x_raw, x_fft, x_wav)
-                probs = torch.sigmoid(logits)
+                # For CrossEntropyLoss, we use softmax to get probabilities
+                probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of class 1 (fake)
                 all_preds.append(probs.cpu())
                 all_labels.append(y.cpu())
             except Exception as e:
@@ -258,8 +259,13 @@ def main():
             print("Error: fake or real data set not found")
             return
             
-        pos_weight = train_label_counts[0] / train_label_counts[1] if train_label_counts[1] > 0 else 1.0
-        print(f"Positive weight (for class 1): {pos_weight:.2f}")
+        # Calculate class weights for CrossEntropyLoss
+        total_samples = sum(train_label_counts.values())
+        class_weights = torch.tensor([
+            total_samples / (2 * train_label_counts[0]),  # weight for class 0 (real)
+            total_samples / (2 * train_label_counts[1])   # weight for class 1 (fake)
+        ]).to(device)
+        print(f"Class weights: {class_weights}")
         
     except Exception as e:
         print(f"Error loading dataset: {e}")
@@ -282,7 +288,8 @@ def main():
         model = TBranchDetector().to(device)
         print(f"Model loaded successfully")
 
-        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]).to(device))
+        # Use CrossEntropyLoss with class weights
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = optim.Adam(model.parameters(), lr=0.0004, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3)
 
