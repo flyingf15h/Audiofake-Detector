@@ -276,49 +276,32 @@ class TBranchDetector(nn.Module):
     def resize_spectrogram(self, spec, target_size=224):
         return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
     
-    def forward(self, x):
-        # Args x = Raw audio tensor (B, 1, T)
-        # Returns Logits (B, num_classes)
+    def forward(self, x_raw, x_fft, x_wav):
+        fft_resized = self.resize_spectrogram(x_fft, target_size=224)  
+        ast_spec_features = self.ast_spectrogram(fft_resized)  # (B, embed_dim)
 
-        batch_size = x.shape[0]
-        
-        # Branch 1
-        mel_spec = self.spectrogram_extractor(x)  # (B, 1, n_mels, time_frames)
-        mel_spec_resized = self.resize_spectrogram(mel_spec)  # (B, 1, 224, 224)
-        ast_spec_features = self.ast_spectrogram(mel_spec_resized)  # (B, embed_dim)
-        
-        # Branch 2
-        wavelet_coeffs = self.wavelet_transform(x)  # (B, 1, H, W)
-        wavelet_resized = self.resize_spectrogram(wavelet_coeffs)  # (B, 1, 224, 224)
-        ast_wavelet_features = self.ast_wavelet(wavelet_resized)  # (B, embed_dim)
-        
-        # Branch 3
-        cnn_features = self.cnn_raw(x)  # (B, 512)
-        
-        # Fusion
+        wav_resized = self.resize_spectrogram(x_wav, target_size=224)
+        ast_wavelet_features = self.ast_wavelet(wav_resized)  # (B, embed_dim)
+
+        cnn_features = self.cnn_raw(x_raw)  # (B, 512)
+
         all_features = [ast_spec_features, ast_wavelet_features, cnn_features]
         fused_features = self.fusion(all_features)  # (B, fusion_hidden_dim)
-        
+
         logits = self.classifier(fused_features)  # (B, num_classes)
-        
         return logits
+
     
-    def getbranch_features(self, x):
-        mel_spec = self.spectrogram_extractor(x)
-        mel_spec_resized = self.resize_spectrogram(mel_spec)
-        ast_spec_features = self.ast_spectrogram(mel_spec_resized)
-        
-        wavelet_coeffs = self.wavelet_transform(x)
-        wavelet_resized = self.resize_spectrogram(wavelet_coeffs)
-        ast_wavelet_features = self.ast_wavelet(wavelet_resized)
-        
-        cnn_features = self.cnn_raw(x)
-        
-        return {
-            'spectrogram': ast_spec_features,
-            'wavelet': ast_wavelet_features,
-            'raw': cnn_features
-        }
+    def getbranch_features(self, x_raw, x_fft, x_wav):
+        fft_resized = self.resize_spectrogram(x_fft, target_size=224)
+        ast_spec_features = self.ast_spectrogram(fft_resized)
+
+        wav_resized = self.resize_spectrogram(x_wav, target_size=224)
+        ast_wavelet_features = self.ast_wavelet(wav_resized)
+
+        cnn_features = self.cnn_raw(x_raw)
+
+        return ast_spec_features, ast_wavelet_features, cnn_features
 
 
 def create_model(sample_rate=16000, input_length=16000, num_classes=2):
