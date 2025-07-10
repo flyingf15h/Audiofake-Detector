@@ -189,8 +189,11 @@ def prep_cachedata(cache_dir, test_size=0.2, val_size=0.1, augment_train=True):
 
 
 if __name__ == '__main__':
-    data_dir = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2sec/training"
+    data_dir = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds/training"
     cache_dir = "/kaggle/working/cached_features/training"
+
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+
     cache_features(data_dir, cache_dir, sample_rate=16000, chunk_size=16000, overwrite=False)
 
     train_ds, val_ds, test_ds = prep_cachedata("/kaggle/working/cached_features/training")
