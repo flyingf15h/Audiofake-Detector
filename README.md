@@ -4,7 +4,7 @@ Audiofake detector trained on Kaggle fake-or-real-audio and HuggingFace MLAAD da
 
 Instructions 
 
-### 1. Installation
+**Installation**
 
 ```bash
 # Clone the repository
@@ -19,7 +19,7 @@ chmod +x install.sh
 install.bat
 ```
 
-### 3. Kaggle Setup
+**Kaggle Setup**
 
 1. https://www.kaggle.com/account
 2. Create API token
@@ -28,7 +28,7 @@ install.bat
 5. Set permissions `chmod 600 ~/.kaggle/kaggle.json`
 
 
-### Default Config
+**Default Config**
 
 ```python
 config = {
@@ -65,7 +65,7 @@ Evaluation Metrics
 - F1-Score
 - Confusion Matrix
 
-### Weights & Biases
+**Weights & Biases**
 
 Enable W&B logging:
 
