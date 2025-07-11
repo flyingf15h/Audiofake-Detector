@@ -12,7 +12,8 @@ from model import TBranchDetector
 
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
-    audioArr = librosa.util.fix_length(audioArr, fixed_length).astype(np.float32)
+    audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
+
     x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
     x_raw = np.expand_dims(x_raw, axis=0)
 
