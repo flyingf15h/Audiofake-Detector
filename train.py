@@ -1,16 +1,44 @@
-import os
-import random
-import warnings
+import os, glob, random, json, warnings, numpy as np
 from pathlib import Path
 from collections import Counter
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+import librosa, pywt
+from datasets import load_dataset
 from model import TBranchDetector
+import multiprocessing
+
+
+def prepInputArray(audioArr, sr=16000, fixed_length=16000):
+    audioArr = librosa.util.fix_length(audioArr, fixed_length).astype(np.float32)
+    x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
+    x_raw = np.expand_dims(x_raw, axis=0)
+
+    try:
+        stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
+        mag = np.abs(stft)[:128, :128]
+        x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
+        x_fft = np.expand_dims(x_fft, axis=0)
+    except Exception:
+        x_fft = np.zeros((1, 128, 128), dtype=np.float32)
+
+    try:
+        coeffs = pywt.wavedec(audioArr, 'db4', level=4)
+        cA4_resized = np.resize(coeffs[0], (64, 128))
+        x_wav = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
+        x_wav = np.expand_dims(x_wav, axis=0)
+    except Exception:
+        x_wav = np.zeros((1, 64, 128), dtype=np.float32)
+
+    return x_raw, x_fft, x_wav
+
+def collate_fn(batch):
+    raws, ffts, wavs, labels = zip(*batch)
+    return torch.stack(raws), torch.stack(ffts), torch.stack(wavs), torch.tensor(labels, dtype=torch.long)
+
 
 class CachedAudioDataset(Dataset):
     def __init__(self, folder_path, augment=False):
@@ -35,10 +63,8 @@ class CachedAudioDataset(Dataset):
         except Exception as e:
             print(f"Failed to load {self.files[idx]}: {e}")
             return (
-                torch.zeros((1, 16000)), 
-                torch.zeros((1, 128, 128)),
-                torch.zeros((1, 64, 128)), 
-                torch.tensor(0)
+                torch.zeros((1,16000)), torch.zeros((1,128,128)),
+                torch.zeros((1,64,128)), torch.tensor(0)
             )
 
     def augment(self, x_raw):
@@ -57,10 +83,6 @@ class CachedAudioDataset(Dataset):
             pass
         return x_raw
 
-
-def collate_fn(batch):
-    raws, ffts, wavs, labels = zip(*batch)
-    return torch.stack(raws), torch.stack(ffts), torch.stack(wavs), torch.stack(labels)
 
 def train_1epoch(model, dataloader, criterion, optimizer, device):
     model.train()
@@ -85,7 +107,7 @@ def evaluate(model, dataloader, device):
             logits = model(x_raw, x_fft, x_wav)
             prob = torch.softmax(logits, dim=1)[:, 1]
             preds.append(prob.cpu())
-            labels.append(y.cpu())
+            labels.append(y)
 
     preds = torch.cat(preds).numpy()
     labels = torch.cat(labels).numpy()
@@ -103,33 +125,23 @@ def main():
     # Load datasets
     train_ds = CachedAudioDataset("/kaggle/input/fake-or-real-preprocessed/train", augment=True)
     val_ds = CachedAudioDataset("/kaggle/input/fake-or-real-preprocessed/val", augment=False)
-
-    # Calculate class weights
-    labels = []
-    for file in Path("/kaggle/input/fake-or-real-preprocessed/train").glob("*.npz"):
-        data = np.load(file, allow_pickle=True)
-        labels.append(data['label'])
-    class_counts = Counter(labels)
-    total = sum(class_counts.values())
-    class_weights = torch.tensor([
-        total / (2 * class_counts[0]),
-        total / (2 * class_counts[1])
-    ], device=device)
-
-    # Create dataloaders
     batch_size = 64
+    num_workers = min(4, multiprocessing.cpu_count())
+
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                            collate_fn=collate_fn, num_workers=2)
+                              collate_fn=collate_fn, num_workers=num_workers)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                          collate_fn=collate_fn, num_workers=2)
+                            collate_fn=collate_fn, num_workers=num_workers)
 
     # Model setup
     model = TBranchDetector().to(device)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
+    total_samples = len(train_ds)
+    class_weights = torch.tensor([1.0, 1.0], device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=4e-4, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=(4e-4)*batch_size/16, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
     # Training loop
@@ -140,7 +152,6 @@ def main():
         train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
         print(f"Train Loss: {train_loss:.4f}")
 
-        # Validation
         val_loss = 0
         model.eval()
         with torch.no_grad():
@@ -158,7 +169,6 @@ def main():
             best_loss = val_loss
             torch.save(model.state_dict(), "best_model.pth")
             print("  *** New best model saved ***")
-            patience = 10  # Reset patience
         else:
             patience -= 1
             if patience == 0:
