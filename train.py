@@ -1,15 +1,14 @@
-import os, glob, random, json, warnings, numpy as np
+import os, glob, random, warnings, numpy as np
 from pathlib import Path
 from collections import Counter
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
 import librosa, pywt
-from datasets import load_dataset
-from model import TBranchDetector
 import multiprocessing
+from model import TBranchDetector
 
 
 def prepInputArray(audioArr, sr=16000, fixed_length=16000):
@@ -39,49 +38,43 @@ def collate_fn(batch):
     raws, ffts, wavs, labels = zip(*batch)
     return torch.stack(raws), torch.stack(ffts), torch.stack(wavs), torch.tensor(labels, dtype=torch.long)
 
-
-class CachedAudioDataset(Dataset):
+class FolderAudioDataset(Dataset):
     def __init__(self, folder_path, augment=False):
-        self.files = list(Path(folder_path).glob("*.npz"))
+        real_files = list(Path(folder_path, "real").glob("*.wav"))
+        fake_files = list(Path(folder_path, "fake").glob("*.wav"))
+        self.files = [(f, 0) for f in real_files] + [(f, 1) for f in fake_files]
         self.augment_flag = augment
 
     def __len__(self):
         return len(self.files)
 
     def __getitem__(self, idx):
+        path, label = self.files[idx]
         try:
-            data = np.load(self.files[idx], allow_pickle=True)
-            x_raw = torch.tensor(data['raw'], dtype=torch.float32)
-            x_fft = torch.tensor(data['stft'], dtype=torch.float32)
-            x_wav = torch.tensor(data['wav'], dtype=torch.float32)
-            label = torch.tensor(data['label'], dtype=torch.long)
-
+            audio, sr = librosa.load(path, sr=16000)
             if self.augment_flag:
-                x_raw = self.augment(x_raw)
-
-            return x_raw, x_fft, x_wav, label
+                audio = self.augment(audio)
+            x_raw, x_fft, x_wav = prepInputArray(audio)
+            return torch.tensor(x_raw), torch.tensor(x_fft), torch.tensor(x_wav), torch.tensor(label)
         except Exception as e:
-            print(f"Failed to load {self.files[idx]}: {e}")
+            print(f"Error loading {path}: {e}")
             return (
                 torch.zeros((1,16000)), torch.zeros((1,128,128)),
                 torch.zeros((1,64,128)), torch.tensor(0)
             )
 
-    def augment(self, x_raw):
+    def augment(self, audio):
         try:
-            audio = x_raw.squeeze().numpy()
             if random.random() < 0.3:
-                shift = random.randint(-1600, 1600)
-                audio = np.roll(audio, shift)
+                audio = np.roll(audio, random.randint(-1600, 1600))
             if random.random() < 0.3:
                 audio *= random.uniform(0.8, 1.2)
             if random.random() < 0.2:
                 audio += np.random.normal(0, 0.005, audio.shape)
             audio = np.clip(audio, -1.0, 1.0)
-            x_raw = torch.tensor((audio - np.mean(audio)) / (np.std(audio) + 1e-8)).unsqueeze(0)
         except Exception:
             pass
-        return x_raw
+        return audio
 
 
 def train_1epoch(model, dataloader, criterion, optimizer, device):
@@ -118,13 +111,15 @@ def evaluate(model, dataloader, device):
         auc = float('nan')
     return acc, auc, labels, (preds >= 0.5).astype(int)
 
+
 def main():
     warnings.filterwarnings("ignore")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Load datasets
-    train_ds = CachedAudioDataset("/kaggle/input/fake-or-real-preprocessed/train", augment=True)
-    val_ds = CachedAudioDataset("/kaggle/input/fake-or-real-preprocessed/val", augment=False)
+    base = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds"
+    train_ds = FolderAudioDataset(os.path.join(base, "training"), augment=True)
+    val_ds = FolderAudioDataset(os.path.join(base, "validation"), augment=False)
+
     batch_size = 64
     num_workers = min(4, multiprocessing.cpu_count())
 
@@ -133,18 +128,15 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
 
-    # Model setup
     model = TBranchDetector().to(device)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
-    total_samples = len(train_ds)
     class_weights = torch.tensor([1.0, 1.0], device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=(4e-4)*batch_size/16, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
 
-    # Training loop
     best_loss = float("inf")
     patience = 10
     for epoch in range(1, 50):
@@ -175,12 +167,12 @@ def main():
                 print("Early stopping.")
                 break
 
-    # Final evaluation
     model.load_state_dict(torch.load("best_model.pth"))
     acc, auc, y_true, y_pred = evaluate(model, val_loader, device)
     print("\nFinal Evaluation")
     print(f"Accuracy: {acc:.4f}, AUC: {auc:.4f}")
     print(classification_report(y_true, y_pred, target_names=['Real', 'Fake']))
+
 
 if __name__ == "__main__":
     main()
