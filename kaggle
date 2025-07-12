@@ -1,1 +1,129 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.11.13","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":12434435,"sourceType":"datasetVersion","datasetId":7843435}],"isInternetEnabled":true,"language":"python","sourceType":"notebook","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"!git pull","metadata":{"_uuid":"f76302e8-954f-487d-9676-fe249f673d31","_cell_guid":"bd471b6c-3276-4a8c-825f-c6d02a33c1af","trusted":true,"collapsed":false,"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2025-07-11T16:10:41.559798Z","iopub.execute_input":"2025-07-11T16:10:41.560548Z","iopub.status.idle":"2025-07-11T16:10:42.013103Z","shell.execute_reply.started":"2025-07-11T16:10:41.560514Z","shell.execute_reply":"2025-07-11T16:10:42.012161Z"}},"outputs":[{"name":"stdout","text":"remote: Enumerating objects: 5, done.\u001b[K\nremote: Counting objects: 100% (5/5), done.\u001b[K\nremote: Compressing objects: 100% (1/1), done.\u001b[K\nremote: Total 3 (delta 2), reused 3 (delta 2), pack-reused 0 (from 0)\u001b[K\nUnpacking objects: 100% (3/3), 279 bytes | 279.00 KiB/s, done.\nFrom https://github.com/flyingf15h/Audiofake-Detector\n   d88494b..1204005  main       -> origin/main\nUpdating d88494b..1204005\nFast-forward\n train.py | 3 \u001b[32m++\u001b[m\u001b[31m-\u001b[m\n 1 file changed, 2 insertions(+), 1 deletion(-)\n","output_type":"stream"}],"execution_count":16},{"cell_type":"code","source":"!python train.py","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2025-07-11T16:10:44.041232Z","iopub.execute_input":"2025-07-11T16:10:44.042009Z","execution_failed":"2025-07-11T19:48:41.342Z"}},"outputs":[{"name":"stdout","text":"\nEpoch 1/50\nTrain Loss: 0.5412\nVal Loss: 0.3541 | Acc: 0.8574 | AUC: 0.9507\n  *** New best model saved ***\n\nEpoch 2/50\nTrain Loss: 0.2402\nVal Loss: 0.2099 | Acc: 0.9158 | AUC: 0.9838\n  *** New best model saved ***\n\nEpoch 3/50\nTrain Loss: 0.1851\nVal Loss: 0.1375 | Acc: 0.9423 | AUC: 0.9916\n  *** New best model saved ***\n\nEpoch 4/50\nTrain Loss: 0.1512\nVal Loss: 0.8044 | Acc: 0.6967 | AUC: 0.9886\n\nEpoch 5/50\nTrain Loss: 0.1364\nVal Loss: 0.2326 | Acc: 0.9048 | AUC: 0.9904\n\nEpoch 6/50\nTrain Loss: 0.1303\nVal Loss: 0.1050 | Acc: 0.9646 | AUC: 0.9933\n  *** New best model saved ***\n\nEpoch 7/50\nTrain Loss: 0.1318\nVal Loss: 0.1096 | Acc: 0.9685 | AUC: 0.9946\n\nEpoch 8/50\nTrain Loss: 0.1269\nVal Loss: 0.2779 | Acc: 0.8818 | AUC: 0.9809\n\nEpoch 9/50\nTrain Loss: 0.1507\nVal Loss: 0.0793 | Acc: 0.9724 | AUC: 0.9954\n  *** New best model saved ***\n\nEpoch 10/50\nTrain Loss: 0.1026\nVal Loss: 0.1129 | Acc: 0.9628 | AUC: 0.9941\n\nEpoch 11/50\nTrain Loss: 0.1106\nVal Loss: 0.0692 | Acc: 0.9756 | AUC: 0.9967\n  *** New best model saved ***\n\nEpoch 12/50\nTrain Loss: 0.1038\nVal Loss: 0.1118 | Acc: 0.9618 | AUC: 0.9951\n\nEpoch 13/50\nTrain Loss: 0.1212\nVal Loss: 0.0896 | Acc: 0.9692 | AUC: 0.9956\n\nEpoch 14/50\n","output_type":"stream"}],"execution_count":null}]}
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "363064cd",
+   "metadata": {
+    "_cell_guid": "bd471b6c-3276-4a8c-825f-c6d02a33c1af",
+    "_uuid": "f76302e8-954f-487d-9676-fe249f673d31",
+    "collapsed": false,
+    "execution": {
+     "iopub.execute_input": "2025-07-12T00:29:12.725335Z",
+     "iopub.status.busy": "2025-07-12T00:29:12.725038Z",
+     "iopub.status.idle": "2025-07-12T00:29:12.734397Z",
+     "shell.execute_reply": "2025-07-12T00:29:12.733456Z"
+    },
+    "jupyter": {
+     "outputs_hidden": false
+    },
+    "papermill": {
+     "duration": 0.013741,
+     "end_time": "2025-07-12T00:29:12.735721",
+     "exception": false,
+     "start_time": "2025-07-12T00:29:12.721980",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[Errno 2] No such file or directory: 'Audiofake-Detector'\n",
+      "/kaggle/working\n"
+     ]
+    }
+   ],
+   "source": [
+    "%cd Audiofake-Detector "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "3a54e0ab",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-07-12T00:29:12.740280Z",
+     "iopub.status.busy": "2025-07-12T00:29:12.739481Z",
+     "iopub.status.idle": "2025-07-12T00:29:12.968877Z",
+     "shell.execute_reply": "2025-07-12T00:29:12.967774Z"
+    },
+    "papermill": {
+     "duration": 0.233125,
+     "end_time": "2025-07-12T00:29:12.970441",
+     "exception": false,
+     "start_time": "2025-07-12T00:29:12.737316",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "python3: can't open file '/kaggle/working/train.py': [Errno 2] No such file or directory\r\n"
+     ]
+    }
+   ],
+   "source": [
+    "!python train.py"
+   ]
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [
+    {
+     "datasetId": 4555568,
+     "sourceId": 8130934,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 7843435,
+     "sourceId": 12434435,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "isGpuEnabled": false,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.13"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 5.359711,
+   "end_time": "2025-07-12T00:29:13.389930",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2025-07-12T00:29:08.030219",
+   "version": "2.6.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
