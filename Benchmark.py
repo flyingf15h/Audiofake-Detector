@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import librosa
 import pywt
+import torch.nn as nn
 from model import TBranchDetector
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score
 from datasets import load_dataset
@@ -12,13 +13,16 @@ from tqdm import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-model = TBranchDetector().to(device)
-model.load_state_dict(torch.load(
-    "/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth",
-    map_location=device,
-    weights_only=False  
-))
+model = nn.DataParallel(TBranchDetector()).to(device)
+
+model.load_state_dict(
+    torch.load(
+        "/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth",
+        map_location=device
+    )
+)
 model.eval()
+
 
 def preprocess(audio, sr=16000):
     audio = librosa.util.fix_length(audio, size=16000)
