@@ -2,23 +2,6 @@
 
 Audiofake detector trained on Kaggle fake-or-real-audio and HuggingFace MLAAD datasets.
 
-Instructions 
-
-**Installation**
-
-```bash
-# Clone the repository
-git clone <your-repo-url>
-cd audio-deepfake-detector
-
-# Run the installation script
-chmod +x install.sh
-./install.sh
-
-# Windows:
-install.bat
-```
-
 **Kaggle Setup**
 
 1. https://www.kaggle.com/account
