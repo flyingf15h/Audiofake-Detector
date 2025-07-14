@@ -13,7 +13,11 @@ from tqdm import tqdm
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 model = TBranchDetector().to(device)
-model.load_state_dict(torch.load("/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth", map_location=device))
+model.load_state_dict(torch.load(
+    "/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth",
+    map_location=device,
+    weights_only=False  
+))
 model.eval()
 
 def preprocess(audio, sr=16000):
