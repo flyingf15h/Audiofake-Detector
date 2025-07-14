@@ -58,22 +58,37 @@ class FilepathDataset(Dataset):
             return torch.zeros(1, 16000), torch.zeros(1, 128, 128), torch.zeros(1, 64, 128), -1
 
 class WaveFakeDataset(Dataset):
-    def __init__(self, split="test", max_samples=None):
-        self.dataset = load_dataset("Keerthana982/wavefake-audio", split=split, streaming=True)
+    def __init__(self, partitions=["partition0"], max_samples=None):
+        self.datasets = [
+            load_dataset("Keerthana982/wavefake-audio", split=p, streaming=True)
+            for p in partitions
+        ]
         self.max_samples = max_samples
-        
+
     def __iter__(self):
         count = 0
-        for sample in self.dataset:
-            if self.max_samples and count >= self.max_samples:
-                break
-            try:
-                audio = sample["audio"]["array"]
-                audio = librosa.util.fix_length(audio, size=16000)
-                yield *preprocess(audio), sample["label"]
-                count += 1
-            except Exception as e:
-                print(f"Skipping WaveFake sample: {str(e)}")
+        for ds in self.datasets:
+            for sample in ds:
+                if self.max_samples and count >= self.max_samples:
+                    return
+                try:
+                    audio = sample["audio"]["array"]
+                    audio = librosa.util.fix_length(audio, size=16000)
+                    yield *preprocess(audio), sample["label"]
+                    count += 1
+                except Exception as e:
+                    print(f"Skipping WaveFake sample: {str(e)}")
+
+wavefake_loader = DataLoader(
+    WaveFakeDataset(partitions=["partition0", "partition1", "partition2"], max_samples=15000),
+    batch_size=64,
+    collate_fn=lambda x: (
+        torch.stack([item[0] for item in x]),
+        torch.stack([item[1] for item in x]),
+        torch.stack([item[2] for item in x]),
+        torch.tensor([item[3] for item in x])
+    )
+)
 
 def evaluate(dataloader, name="Dataset"):
     criterion = torch.nn.CrossEntropyLoss()
