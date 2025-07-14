@@ -3,21 +3,21 @@
   {
    "cell_type": "code",
    "execution_count": 1,
-   "id": "f8e0d365",
+   "id": "88aed688",
    "metadata": {
     "_cell_guid": "b1076dfc-b9ad-4769-8c92-a6c4dae69d19",
     "_uuid": "8f2839f25d086af736a60e9eeb907d3b93b6e0e5",
     "execution": {
-     "iopub.execute_input": "2025-07-14T16:10:04.315306Z",
-     "iopub.status.busy": "2025-07-14T16:10:04.315036Z",
-     "iopub.status.idle": "2025-07-14T16:10:18.433526Z",
-     "shell.execute_reply": "2025-07-14T16:10:18.432575Z"
+     "iopub.execute_input": "2025-07-14T16:14:45.285517Z",
+     "iopub.status.busy": "2025-07-14T16:14:45.284655Z",
+     "iopub.status.idle": "2025-07-14T16:15:00.006845Z",
+     "shell.execute_reply": "2025-07-14T16:15:00.005763Z"
     },
     "papermill": {
-     "duration": 14.122524,
-     "end_time": "2025-07-14T16:10:18.435084",
+     "duration": 14.726927,
+     "end_time": "2025-07-14T16:15:00.008643",
      "exception": false,
-     "start_time": "2025-07-14T16:10:04.312560",
+     "start_time": "2025-07-14T16:14:45.281716",
      "status": "completed"
     },
     "tags": []
@@ -28,23 +28,24 @@
      "output_type": "stream",
      "text": [
       "Cloning into 'Audiofake-Detector'...\r\n",
-      "remote: Enumerating objects: 213, done.\u001b[K\r\n",
-      "remote: Counting objects: 100% (213/213), done.\u001b[K\r\n",
-      "remote: Compressing objects: 100% (154/154), done.\u001b[K\r\n",
-      "remote: Total 213 (delta 109), reused 136 (delta 57), pack-reused 0 (from 0)\u001b[K\r\n",
-      "Receiving objects: 100% (213/213), 2.78 MiB | 10.09 MiB/s, done.\r\n",
-      "Resolving deltas: 100% (109/109), done.\r\n",
+      "remote: Enumerating objects: 221, done.\u001b[K\r\n",
+      "remote: Counting objects: 100% (5/5), done.\u001b[K\r\n",
+      "remote: Compressing objects: 100% (4/4), done.\u001b[K\r\n",
+      "remote: Total 221 (delta 1), reused 3 (delta 1), pack-reused 216 (from 1)\u001b[K\r\n",
+      "Receiving objects: 100% (221/221), 2.78 MiB | 22.74 MiB/s, done.\r\n",
+      "Resolving deltas: 100% (115/115), done.\r\n",
       "/kaggle/working/Audiofake-Detector\n",
       "Traceback (most recent call last):\r\n",
       "  File \"/kaggle/working/Audiofake-Detector/Benchmark.py\", line 16, in <module>\r\n",
-      "    model.load_state_dict(torch.load(\"/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth\", map_location=device))\r\n",
-      "                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n",
-      "  File \"/usr/local/lib/python3.11/dist-packages/torch/serialization.py\", line 1494, in load\r\n",
-      "    raise pickle.UnpicklingError(_get_wo_message(str(e))) from None\r\n",
-      "_pickle.UnpicklingError: Weights only load failed. In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.\r\n",
-      "Please file an issue with the following so that we can make `weights_only=True` compatible with your use case: WeightsUnpickler error: Unsupported operand 60\r\n",
-      "\r\n",
-      "Check the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html.\r\n"
+      "    model.load_state_dict(torch.load(\r\n",
+      "                          ^^^^^^^^^^^\r\n",
+      "  File \"/usr/local/lib/python3.11/dist-packages/torch/serialization.py\", line 1495, in load\r\n",
+      "    return _legacy_load(\r\n",
+      "           ^^^^^^^^^^^^^\r\n",
+      "  File \"/usr/local/lib/python3.11/dist-packages/torch/serialization.py\", line 1744, in _legacy_load\r\n",
+      "    magic_number = pickle_module.load(f, **pickle_load_args)\r\n",
+      "                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\r\n",
+      "_pickle.UnpicklingError: invalid load key, '<'.\r\n"
      ]
     }
    ],
@@ -102,14 +103,14 @@
   },
   "papermill": {
    "default_parameters": {},
-   "duration": 18.650557,
-   "end_time": "2025-07-14T16:10:18.755387",
+   "duration": 19.542012,
+   "end_time": "2025-07-14T16:15:00.328953",
    "environment_variables": {},
    "exception": null,
    "input_path": "__notebook__.ipynb",
    "output_path": "__notebook__.ipynb",
    "parameters": {},
-   "start_time": "2025-07-14T16:10:00.104830",
+   "start_time": "2025-07-14T16:14:40.786941",
    "version": "2.6.0"
   }
  },
