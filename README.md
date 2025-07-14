@@ -1,6 +1,7 @@
 # Basic-Audi-Detector-Test
 
-Audiofake detector trained on Kaggle fake-or-real-audio and HuggingFace MLAAD datasets.
+Audiofake detector trained on Kaggle fake-or-real.
+https://huggingface.co/flyingf15h/audiofake-model
 
 **Kaggle Setup**
 
