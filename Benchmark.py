@@ -76,7 +76,7 @@ class WaveFakeDataset(Dataset):
                 print(f"Skipping WaveFake sample: {str(e)}")
 
 def evaluate(dataloader, name="Dataset"):
-    criterion = torch.nn.BCEWithLogitsLoss()
+    criterion = torch.nn.CrossEntropyLoss()
     y_true, y_pred, y_prob = [], [], []
     total_loss = 0.0
     
@@ -92,13 +92,13 @@ def evaluate(dataloader, name="Dataset"):
             
         with torch.no_grad():
             outputs = model(x_raw[mask], x_fft[mask], x_wav[mask]).squeeze(-1) 
-            loss = criterion(outputs, labels[mask].unsqueeze(1))
-            probs = torch.sigmoid(outputs).squeeze()
+            loss = criterion(outputs, labels[mask].long())
+            probs = torch.softmax(outputs, dim=1)[:, 1] 
             
         total_loss += loss.item() * mask.sum()
         y_true.extend(labels[mask].cpu().tolist())
         y_prob.extend(probs.cpu().tolist())
-        y_pred.extend((probs >= 0.5).long().cpu().tolist())
+        y_pred.extend(torch.argmax(outputs, dim=1).cpu().tolist())
     
     if len(y_true) == 0:
         print(f"No valid samples found in {name}!")
