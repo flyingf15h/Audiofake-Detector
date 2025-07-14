@@ -121,7 +121,7 @@ def main():
     train_ds = FolderAudioDataset(os.path.join(base, "training"), augment=True)
     val_ds = FolderAudioDataset(os.path.join(base, "validation"), augment=False)
 
-    batch_size = 64
+    batch_size = 128
     num_workers = min(4, multiprocessing.cpu_count())
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,

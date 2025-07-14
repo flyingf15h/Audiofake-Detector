@@ -23,7 +23,6 @@ model.load_state_dict(
 )
 model.eval()
 
-
 def preprocess(audio, sr=16000):
     audio = librosa.util.fix_length(audio, size=16000)
     x_raw = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)
@@ -42,7 +41,6 @@ def preprocess(audio, sr=16000):
         torch.tensor(x_wav).unsqueeze(0).float()
     )
 
-# Dataset Loaders
 class FilepathDataset(Dataset):
     def __init__(self, file_label_pairs):
         self.data = file_label_pairs
@@ -89,11 +87,11 @@ def evaluate(dataloader, name="Dataset"):
         labels = labels.float().to(device)
         
         mask = labels != -1
-        if not mask.any():
+        if mask.sum() == 0:  
             continue
             
         with torch.no_grad():
-            outputs = model(x_raw[mask], x_fft[mask], x_wav[mask])
+            outputs = model(x_raw[mask], x_fft[mask], x_wav[mask]).squeeze(-1) 
             loss = criterion(outputs, labels[mask].unsqueeze(1))
             probs = torch.sigmoid(outputs).squeeze()
             
@@ -128,7 +126,7 @@ if __name__ == "__main__":
         
         loader = DataLoader(
             FilepathDataset(data),
-            batch_size=64,
+            batch_size=128,  
             num_workers=2,
             collate_fn=lambda x: (
                 torch.stack([item[0] for item in x]),
@@ -141,8 +139,8 @@ if __name__ == "__main__":
     
     # WaveFake (streaming)
     wavefake_loader = DataLoader(
-        WaveFakeDataset(max_samples=10000),  # Adjust as needed
-        batch_size=64,
+        WaveFakeDataset(max_samples=10000),
+        batch_size=128, 
         collate_fn=lambda x: (
             torch.stack([item[0] for item in x]),
             torch.stack([item[1] for item in x]),
