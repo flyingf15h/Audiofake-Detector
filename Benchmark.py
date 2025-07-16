@@ -1,4 +1,3 @@
-import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -10,10 +9,9 @@ from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
                            precision_score, recall_score, log_loss,
                            classification_report, roc_curve)
 from datasets import load_dataset
-import glob
 from tqdm import tqdm
 from pathlib import Path
-import random
+from collections import defaultdict
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -131,17 +129,39 @@ def load_in_the_wild(max_samples=300):
         data += [(str(f), label) for f in files]
     return data
 
-def load_asvspoof(max_samples=700):
-    base = "/kaggle/input/asvspoof-2021/LA/ASVspoof2021_LA_eval/flac"
-    files = sorted(Path(base).glob("*.flac"))
+def load_asvspoof(max_samples=1000):
+    base = "/kaggle/input/asvspoof-2021/LA"
+    protocol_path = f"{base}/ASVspoof2021_LA_cm_protocols/ASVspoof2021.LA.cm.eval.trl.txt"
+    flac_dir = Path(f"{base}/ASVspoof2021_LA_eval/flac")
+    
+    # Mapping from filename to label
+    file_labels = {}
+    with open(protocol_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 4:   
+                file_id = parts[1]
+                label = 0 if parts[3] == 'bonafide' else 1  
+                file_labels[file_id] = label
+    
+    files = []
+    for flac_file in flac_dir.glob("*.flac"):
+        file_id = flac_file.stem
+        if file_id in file_labels:
+            files.append((str(flac_file), file_labels[file_id]))
+        else:
+            print(f"Warning: No label found for {file_id}")
+    
     files = list(reversed(files))
     if max_samples and len(files) > max_samples:
         files = files[:max_samples]
     
-    return [
-        (str(f), 1 if f.name.startswith(('LA_E_', 'LA_D_')) else 0)
-        for f in files
-    ]
+    label_counts = defaultdict(int)
+    for _, label in files:
+        label_counts[label] += 1
+    print(f"ASVspoof 2021 Eval - Real: {label_counts[0]}, Fake: {label_counts[1]}")
+    
+    return files
 
 def load_mlaad(max_samples=200):
     dataset = list(reversed(load_dataset("mueller91/MLAAD", split="test")))
@@ -193,6 +213,7 @@ def evaluate(dataloader, name="Dataset"):
     print(classification_report(y_true, y_pred, target_names=['Real', 'Fake']))
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     datasets = {
         "FOR-Original": load_for_original(max_samples=1000),
         "In-the-Wild": load_in_the_wild(max_samples=300),
@@ -225,3 +246,4 @@ if __name__ == "__main__":
         )
     )
     evaluate(wavefake_loader, "WaveFake")
+    torch.cuda.empty_cache()

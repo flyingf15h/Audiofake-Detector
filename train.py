@@ -1,5 +1,3 @@
-import os
-import glob
 import random
 import numpy as np
 from pathlib import Path
@@ -103,42 +101,57 @@ class AudioDataset(Dataset):
         return np.clip(audio, -1.0, 1.0)
 
 def load_fakeorreal():
-    # Load FOR 2sec and rerec datasets
-    base_path = "/kaggle/input/the-fake-or-real-dataset"
-    datasets = []
-    
-    for dataset in ["for-2sec/for-2seconds", "for-rerec"]:
-        real_files = list(Path(f"{base_path}/{dataset}/training/real").glob("*.wav"))
-        fake_files = list(Path(f"{base_path}/{dataset}/training/fake").glob("*.wav"))
-        datasets += [(str(f), 0) for f in real_files] + [(str(f), 1) for f in fake_files]
-    
-    return datasets
+    base_path = Path("/kaggle/input/the-fake-or-real-dataset")
+    subdirs = ["for-2sec/for-2seconds", "for-rerec"]
+    files = []
+
+    for subdir in subdirs:
+        dataset_path = base_path / subdir
+        real_files = list((dataset_path / "training" / "real").glob("*.wav"))
+        fake_files = list((dataset_path / "training" / "fake").glob("*.wav"))
+        files += [(str(f), 0) for f in real_files]
+        files += [(str(f), 1) for f in fake_files]
+
+    return files
 
 def load_inthewild(split_ratio=0.7):
     # Load in-the-wild dataset with split
     base_path = "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild"
-    real_files = list(Path(f"{base_path}/real").glob("*.wav"))
-    fake_files = list(Path(f"{base_path}/fake").glob("*.wav"))
+    realf = list(Path(f"{base_path}/real").glob("*.wav"))
+    fakef = list(Path(f"{base_path}/fake").glob("*.wav"))
     
-    train_real, _ = train_test_split(real_files, train_size=split_ratio)
-    train_fake, _ = train_test_split(fake_files, train_size=split_ratio)
+    train_real, _ = train_test_split(realf, train_size=split_ratio)
+    train_fake, _ = train_test_split(fakef, train_size=split_ratio)
     
     return [(str(f), 0) for f in train_real] + [(str(f), 1) for f in train_fake]
 
-def load_asvspoof(split_ratio=0.3):
-    # Load ASVspoof 2019 LA dataset
-    base_path = "/kaggle/input/asvspoof-2019-la/ASVspoof2019_LA"
+def load_asvspoof(split_ratio= 1.0):
+    # Load ASVspoof 2019 
+    base_path = "/kaggle/input/asvspoof-2019/LA"
+    protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
+    flac_dir = Path(f"{base_path}/ASVspoof2019_LA_train/flac")
+    
+    # Mapping from filename to label
+    file_labels = {}
+    with open(protocol_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 5:
+                file_id = parts[1]
+                label = 0 if parts[4] == 'bonafide' else 1  
+                file_labels[file_id] = label
+    
+    # Pair files with labels
     files = []
+    for flac_file in flac_dir.glob("*.flac"):
+        file_id = flac_file.stem
+        if file_id in file_labels:
+            files.append((str(flac_file), file_labels[file_id]))
+        else:
+            print(f"Warning: No label found for {file_id}")
     
-    real_files = list(Path(f"{base_path}/ASVspoof2019_LA_train/flac").glob("*.flac"))
-    train_real, _ = train_test_split(real_files, train_size=split_ratio)
-    files += [(str(f), 0) for f in train_real]
-    
-    fake_files = list(Path(f"{base_path}/ASVspoof2019_LA_train/flac").glob("*.flac"))
-    train_fake, _ = train_test_split(fake_files, train_size=split_ratio)
-    files += [(str(f), 1) for f in train_fake]
-    
-    return files
+    train_files, _ = train_test_split(files, train_size=split_ratio, random_state=42)
+    return train_files
 
 def load_mlaad(split_ratio=0.5):
     # Load MLAAD dataset from HuggingFace
@@ -152,10 +165,24 @@ def load_mlaad(split_ratio=0.5):
 
 def get_valset():
     # Get FOR validation set
-    base_path = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds"
-    real_files = list(Path(f"{base_path}/validation/real").glob("*.wav"))
-    fake_files = list(Path(f"{base_path}/validation/fake").glob("*.wav"))
-    return [(str(f), 0) for f in real_files] + [(str(f), 1) for f in fake_files]
+    base_path = "/kaggle/input/the-fake-or-real-dataset"
+    val_data = []
+    val_paths = [
+        f"{base_path}/for-2sec/for-2seconds/validation",
+        f"{base_path}/for-rerec/for-rerecorded/validation"
+    ]
+
+    for val_path in val_paths:
+        val_path = Path(val_path)
+        if val_path.exists():
+            real_files = list((val_path / "real").glob("*.wav"))
+            fake_files = list((val_path / "fake").glob("*.wav"))
+            val_data += [(str(f), 0) for f in real_files] + [(str(f), 1) for f in fake_files]
+    
+    if not val_data:
+        print("Warning: No validation files found")
+    
+    return val_data
 
 class HybridLoss(nn.Module):
     def __init__(self, class_weights):
@@ -303,6 +330,7 @@ def main():
             if patience_counter >= CONFIG["patience"]:
                 print(f"Early stopping at epoch {epoch}")
                 break
+        torch.cuda.empty_cache()
     
     # Final evaluation
     model.load_state_dict(torch.load("best_model.pth"))
