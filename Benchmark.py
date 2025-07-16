@@ -1,20 +1,25 @@
 import os
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import librosa
 import pywt
 import torch.nn as nn
 from model import TBranchDetector
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score
+from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score, 
+                           precision_score, recall_score, log_loss,
+                           classification_report, roc_curve)
 from datasets import load_dataset
 import glob
 from tqdm import tqdm
+from pathlib import Path
+from sklearn.model_selection import train_test_split
+import random
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# Initialize model
 model = nn.DataParallel(TBranchDetector()).to(device)
-
 model.load_state_dict(
     torch.load(
         "/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth",
@@ -25,6 +30,7 @@ model.eval()
 
 def preprocess(audio, sr=16000):
     audio = librosa.util.fix_length(audio, size=16000)
+    
     x_raw = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)
     
     stft = librosa.stft(audio, n_fft=256, hop_length=128)
@@ -42,8 +48,10 @@ def preprocess(audio, sr=16000):
     )
 
 class FilepathDataset(Dataset):
-    def __init__(self, file_label_pairs):
+    def __init__(self, file_label_pairs, max_samples=None):
         self.data = file_label_pairs
+        if max_samples and len(self.data) > max_samples:
+            self.data = random.sample(self.data, max_samples)
         
     def __len__(self):
         return len(self.data)
@@ -51,14 +59,23 @@ class FilepathDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.data[idx]
         try:
-            audio, _ = librosa.load(path, sr=16000)
+            if isinstance(path, dict):  # HuggingFace audio dict
+                audio = librosa.load(path["array"], sr=16000)[0]
+            else:  # Regular file path
+                audio, _ = librosa.load(path, sr=16000)
+                
             return *preprocess(audio), label
         except Exception as e:
             print(f"Skipping {path}: {str(e)}")
-            return torch.zeros(1, 16000), torch.zeros(1, 128, 128), torch.zeros(1, 64, 128), -1
+            return (
+                torch.zeros(1, 16000), 
+                torch.zeros(1, 128, 128),
+                torch.zeros(1, 64, 128), 
+                -1  # Mark invalid samples
+            )
 
 class WaveFakeDataset(Dataset):
-    def __init__(self, partitions=["partition0"], max_samples=None):
+    def __init__(self, partitions=["partition0"], max_samples=1000):
         self.datasets = [
             load_dataset("Keerthana982/wavefake-audio", split=p, streaming=True)
             for p in partitions
@@ -69,7 +86,7 @@ class WaveFakeDataset(Dataset):
         count = 0
         for ds in self.datasets:
             for sample in ds:
-                if self.max_samples and count >= self.max_samples:
+                if count >= self.max_samples:
                     return
                 try:
                     audio = sample["audio"]["array"]
@@ -79,70 +96,98 @@ class WaveFakeDataset(Dataset):
                 except Exception as e:
                     print(f"Skipping WaveFake sample: {str(e)}")
 
-wavefake_loader = DataLoader(
-    WaveFakeDataset(partitions=["partition0", "partition1", "partition2"], max_samples=15000),
-    batch_size=64,
-    collate_fn=lambda x: (
-        torch.stack([item[0] for item in x]),
-        torch.stack([item[1] for item in x]),
-        torch.stack([item[2] for item in x]),
-        torch.tensor([item[3] for item in x])
-    )
-)
+def load_for_original(max_samples=0100):
+    base = "/kaggle/input/the-fake-or-real-dataset/for-original/for-original/testing"
+    data = []
+    for label, name in [(0, 'real'), (1, 'fake')]:
+        files = list(Path(f"{base}/{name}").glob("*.wav"))
+        if max_samples and len(files) > max_samples:
+            files = random.sample(files, max_samples)
+        data += [(str(f), label) for f in files]
+    return data
+
+def load_in_the_wild(max_samples=1000):
+    base = "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild"
+    data = []
+    for label, name in [(0, 'real'), (1, 'fake')]:
+        files = list(Path(f"{base}/{name}").glob("*.wav"))
+        if max_samples and len(files) > max_samples:
+            files = random.sample(files, max_samples)
+        data += [(str(f), label) for f in files]
+    return data
+
+def load_asvspoof(max_samples=5000): 
+    base = "/kaggle/input/asvspoof-2021/LA/ASVspoof2021_LA_eval/flac"
+    files = list(Path(base).glob("*.flac"))
+    if max_samples and len(files) > max_samples:
+        files = random.sample(files, max_samples)
+    
+    return [
+        (str(f), 1 if f.name.startswith(('LA_E_', 'LA_D_')) else 0)
+        for f in files
+    ]
+
+def load_mlaad(max_samples=5000): 
+    dataset = load_dataset("mueller91/MLAAD", split="test")
+    if max_samples and len(dataset) > max_samples:
+        dataset = dataset.select(range(max_samples))
+    return [
+        (item["audio"], 0 if item["label"] == "real" else 1)
+        for item in dataset
+    ]
 
 def evaluate(dataloader, name="Dataset"):
-    criterion = torch.nn.CrossEntropyLoss()
-    y_true, y_pred, y_prob = [], [], []
-    total_loss = 0.0
+    y_true, y_prob = [], []
     
     for x_raw, x_fft, x_wav, labels in tqdm(dataloader, desc=f"Evaluating {name}"):
         x_raw = x_raw.to(device)
         x_fft = x_fft.to(device)
         x_wav = x_wav.to(device)
-        labels = labels.float().to(device)
+        labels = labels.to(device)
         
         mask = labels != -1
-        if mask.sum() == 0:  
+        if mask.sum() == 0:
             continue
             
         with torch.no_grad():
-            outputs = model(x_raw[mask], x_fft[mask], x_wav[mask]).squeeze(-1) 
-            loss = criterion(outputs, labels[mask].long())
-            probs = torch.softmax(outputs, dim=1)[:, 1] 
+            outputs = model(x_raw[mask], x_fft[mask], x_wav[mask])
+            probs = torch.softmax(outputs, dim=1)[:, 1]
             
-        total_loss += loss.item() * mask.sum()
         y_true.extend(labels[mask].cpu().tolist())
         y_prob.extend(probs.cpu().tolist())
-        y_pred.extend(torch.argmax(outputs, dim=1).cpu().tolist())
     
-    if len(y_true) == 0:
-        print(f"No valid samples found in {name}!")
+    if not y_true:
+        print(f"No valid samples in {name}!")
         return
     
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    optimal_idx = np.argmax(tpr - fpr)
+    threshold = thresholds[optimal_idx]
+    y_pred = (np.array(y_prob) >= threshold).astype(int)
+    
     print(f"\nResults for {name}:")
-    print(f"Loss: {total_loss / len(y_true):.4f}")
+    print(f"Optimal Threshold: {threshold:.4f}")
     print(f"Accuracy: {accuracy_score(y_true, y_pred):.4f}")
     print(f"F1: {f1_score(y_true, y_pred):.4f}")
     print(f"Precision: {precision_score(y_true, y_pred):.4f}")
     print(f"Recall: {recall_score(y_true, y_pred):.4f}")
     print(f"AUC: {roc_auc_score(y_true, y_prob):.4f}")
+    print("Classification Report:")
+    print(classification_report(y_true, y_pred, target_names=['Real', 'Fake']))
 
 if __name__ == "__main__":
-    # FoR and In-the-Wild
-    for name, root in [
-        ("FoR-Test", "/kaggle/input/the-fake-or-real-dataset/for-original/for-original/testing"),
-        ("In-the-Wild", "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild")
-    ]:
-        data = []
-        for label_name, label in [('real', 0), ('fake', 1)]:
-            folder = os.path.join(root, label_name)
-            for ext in ('*.wav', '*.mp3', '*.flac'):
-                data.extend([(f, label) for f in glob.glob(os.path.join(folder, ext))])
-        
+    datasets = {
+        "FOR-Original": load_for_original(max_samples=1000),
+        "In-the-Wild": load_in_the_wild(max_samples=300),
+        "ASVspoof": load_asvspoof(max_samples=700),
+        "MLAAD": load_mlaad(max_samples=200),
+    }
+    
+    for name, data in datasets.items():
         loader = DataLoader(
             FilepathDataset(data),
-            batch_size=128,  
-            num_workers=2,
+            batch_size=128,
+            num_workers=4,
             collate_fn=lambda x: (
                 torch.stack([item[0] for item in x]),
                 torch.stack([item[1] for item in x]),
@@ -152,10 +197,10 @@ if __name__ == "__main__":
         )
         evaluate(loader, name)
     
-    # WaveFake (streaming)
+    # Evaluate WaveFake separately
     wavefake_loader = DataLoader(
-        WaveFakeDataset(max_samples=10000),
-        batch_size=128, 
+        WaveFakeDataset(partitions=["partition0", "partition1", "partition2"], max_samples=1000),
+        batch_size=128,
         collate_fn=lambda x: (
             torch.stack([item[0] for item in x]),
             torch.stack([item[1] for item in x]),

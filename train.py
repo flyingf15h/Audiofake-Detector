@@ -1,50 +1,73 @@
-import os, glob, random, warnings, numpy as np
+import os
+import glob
+import random
+import numpy as np
 from pathlib import Path
-from collections import Counter
+from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
-import librosa, pywt
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from sklearn.metrics import (accuracy_score, roc_auc_score, 
+                           classification_report, roc_curve, log_loss)
+import librosa
+import pywt
 import multiprocessing
 from model import TBranchDetector
+import matplotlib.pyplot as plt
+from datasets import load_dataset
+from focal_loss.focal_loss import FocalLoss
+from sklearn.model_selection import train_test_split
 
+# Configuration
+CONFIG = {
+    "sample_rate": 16000,
+    "batch_size": 128,
+    "num_epochs": 50,
+    "lr": 3e-5,
+    "weight_decay": 0.05,
+    "drop_rate": 0.1,
+    "attn_drop_rate": 0.1,
+    "patience": 5,
+    "n_fft_train": 1024,
+    "hop_length_train": 512,
+    "n_fft_eval": 256,
+    "hop_length_eval": 128,
+    "data_splits": {
+        "in_the_wild": 0.7,
+        "asvspoof": 0.3,
+        "mlaad": 0.5
+    }
+}
 
-def prepInputArray(audioArr, sr=16000, fixed_length=16000):
-    audioArr = librosa.util.fix_length(audioArr, size=fixed_length).astype(np.float32)
+def prep_input_array(audio_arr, is_training=False):
+    # Audio preprocessing with train/eval consistency
+    audio_arr = librosa.util.fix_length(audio_arr, size=16000)
+    
+    x_raw = (audio_arr - np.mean(audio_arr)) / (np.std(audio_arr) + 1e-8)
+    
+    n_fft = CONFIG["n_fft_train"] if is_training else CONFIG["n_fft_eval"]
+    hop_length = CONFIG["hop_length_train"] if is_training else CONFIG["hop_length_eval"]
+    
+    stft = librosa.stft(audio_arr, n_fft=n_fft, hop_length=hop_length)
+    mag = np.abs(stft)[:128, :128]
+    x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
+    
+    coeffs = pywt.wavedec(audio_arr, 'db4', level=4)
+    cA4 = np.resize(coeffs[0], (64, 128))
+    x_wav = (cA4 - np.mean(cA4)) / (np.std(cA4) + 1e-8)
+    
+    return (
+        torch.tensor(x_raw).unsqueeze(0).float(),
+        torch.tensor(x_fft).unsqueeze(0).float(),
+        torch.tensor(x_wav).unsqueeze(0).float()
+    )
 
-    x_raw = (audioArr - np.mean(audioArr)) / (np.std(audioArr) + 1e-8)
-    x_raw = np.expand_dims(x_raw, axis=0)
-
-    try:
-        stft = librosa.stft(audioArr, n_fft=256, hop_length=128)
-        mag = np.abs(stft)[:128, :128]
-        x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
-        x_fft = np.expand_dims(x_fft, axis=0)
-    except Exception:
-        x_fft = np.zeros((1, 128, 128), dtype=np.float32)
-
-    try:
-        coeffs = pywt.wavedec(audioArr, 'db4', level=4)
-        cA4_resized = np.resize(coeffs[0], (64, 128))
-        x_wav = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
-        x_wav = np.expand_dims(x_wav, axis=0)
-    except Exception:
-        x_wav = np.zeros((1, 64, 128), dtype=np.float32)
-
-    return x_raw, x_fft, x_wav
-
-def collate_fn(batch):
-    raws, ffts, wavs, labels = zip(*batch)
-    return torch.stack(raws), torch.stack(ffts), torch.stack(wavs), torch.tensor(labels, dtype=torch.long)
-
-class FolderAudioDataset(Dataset):
-    def __init__(self, folder_path, augment=False):
-        real_files = list(Path(folder_path, "real").glob("*.wav"))
-        fake_files = list(Path(folder_path, "fake").glob("*.wav"))
-        self.files = [(f, 0) for f in real_files] + [(f, 1) for f in fake_files]
-        self.augment_flag = augment
+class AudioDataset(Dataset):
+    def __init__(self, file_label_pairs, augment=False, is_training=False):
+        self.files = file_label_pairs
+        self.augment = augment
+        self.is_training = is_training
 
     def __len__(self):
         return len(self.files)
@@ -52,128 +75,253 @@ class FolderAudioDataset(Dataset):
     def __getitem__(self, idx):
         path, label = self.files[idx]
         try:
-            audio, sr = librosa.load(path, sr=16000)
-            if self.augment_flag:
-                audio = self.augment(audio)
-            x_raw, x_fft, x_wav = prepInputArray(audio)
-            return torch.tensor(x_raw), torch.tensor(x_fft), torch.tensor(x_wav), torch.tensor(label)
+            if isinstance(path, (str, Path)):
+                audio, _ = librosa.load(path, sr=CONFIG["sample_rate"])
+            else: 
+                audio = librosa.load(path["array"], sr=CONFIG["sample_rate"])[0]
+                
+            if self.augment:
+                audio = self._augment(audio)
+            return *prep_input_array(audio, self.is_training), label
         except Exception as e:
-            print(f"Error loading {path}: {e}")
+            print(f"Error loading {path}: {str(e)}")
             return (
-                torch.zeros((1,16000)), torch.zeros((1,128,128)),
-                torch.zeros((1,64,128)), torch.tensor(0)
+                torch.zeros(1, 16000),
+                torch.zeros(1, 128, 128),
+                torch.zeros(1, 64, 128),
+                0  # Default to real class
             )
 
-    def augment(self, audio):
-        try:
-            if random.random() < 0.3:
-                audio = np.roll(audio, random.randint(-1600, 1600))
-            if random.random() < 0.3:
-                audio *= random.uniform(0.8, 1.2)
-            if random.random() < 0.2:
-                audio += np.random.normal(0, 0.005, audio.shape)
-            audio = np.clip(audio, -1.0, 1.0)
-        except Exception:
-            pass
-        return audio
+    def _augment(self, audio):
+        # Time-domain augmentations# 
+        if random.random() < 0.3:
+            audio = np.roll(audio, random.randint(-1600, 1600))
+        if random.random() < 0.3:
+            audio *= random.uniform(0.8, 1.2)
+        if random.random() < 0.2:
+            audio += np.random.normal(0, 0.005, audio.shape)
+        return np.clip(audio, -1.0, 1.0)
 
+def load_fakeorreal():
+    # Load FOR 2sec and rerec datasets
+    base_path = "/kaggle/input/the-fake-or-real-dataset"
+    datasets = []
+    
+    for dataset in ["for-2sec/for-2seconds", "for-rerec"]:
+        real_files = list(Path(f"{base_path}/{dataset}/training/real").glob("*.wav"))
+        fake_files = list(Path(f"{base_path}/{dataset}/training/fake").glob("*.wav"))
+        datasets += [(str(f), 0) for f in real_files] + [(str(f), 1) for f in fake_files]
+    
+    return datasets
 
-def train_1epoch(model, dataloader, criterion, optimizer, device):
+def load_inthewild(split_ratio=0.7):
+    # Load in-the-wild dataset with split
+    base_path = "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild"
+    real_files = list(Path(f"{base_path}/real").glob("*.wav"))
+    fake_files = list(Path(f"{base_path}/fake").glob("*.wav"))
+    
+    train_real, _ = train_test_split(real_files, train_size=split_ratio)
+    train_fake, _ = train_test_split(fake_files, train_size=split_ratio)
+    
+    return [(str(f), 0) for f in train_real] + [(str(f), 1) for f in train_fake]
+
+def load_asvspoof(split_ratio=0.3):
+    # Load ASVspoof 2019 LA dataset
+    base_path = "/kaggle/input/asvspoof-2019-la/ASVspoof2019_LA"
+    files = []
+    
+    real_files = list(Path(f"{base_path}/ASVspoof2019_LA_train/flac").glob("*.flac"))
+    train_real, _ = train_test_split(real_files, train_size=split_ratio)
+    files += [(str(f), 0) for f in train_real]
+    
+    fake_files = list(Path(f"{base_path}/ASVspoof2019_LA_train/flac").glob("*.flac"))
+    train_fake, _ = train_test_split(fake_files, train_size=split_ratio)
+    files += [(str(f), 1) for f in train_fake]
+    
+    return files
+
+def load_mlaad(split_ratio=0.5):
+    # Load MLAAD dataset from HuggingFace
+    dataset = load_dataset("mueller91/MLAAD", split="train")
+    train_data, _ = train_test_split(dataset, train_size=split_ratio)
+    
+    return [
+        (item["audio"], 0 if item["label"] == "real" else 1)
+        for item in train_data
+    ]
+
+def get_valset():
+    # Get FOR validation set
+    base_path = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds"
+    real_files = list(Path(f"{base_path}/validation/real").glob("*.wav"))
+    fake_files = list(Path(f"{base_path}/validation/fake").glob("*.wav"))
+    return [(str(f), 0) for f in real_files] + [(str(f), 1) for f in fake_files]
+
+class HybridLoss(nn.Module):
+    def __init__(self, class_weights):
+        super().__init__()
+        self.ce_loss = nn.CrossEntropyLoss(weight=class_weights)
+        self.focal_loss = FocalLoss(gamma=2, alpha=class_weights[1].item())
+        
+    def forward(self, logits, targets):
+        return 0.7 * self.ce_loss(logits, targets) + 0.3 * self.focal_loss(logits, targets)
+
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss, count = 0, 0
-    for x_raw, x_fft, x_wav, y in dataloader:
-        x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
+    total_loss = 0.0
+    for x_raw, x_fft, x_wav, y in loader:
+        x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
+        y = y.to(device)
+        
         optimizer.zero_grad()
         logits = model(x_raw, x_fft, x_wav)
         loss = criterion(logits, y)
         loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        total_loss += loss.item() * y.size(0)
-        count += y.size(0)
-    return total_loss / max(count, 1)
+        
+        total_loss += loss.item() * x_raw.size(0)
+    return total_loss / len(loader.dataset)
 
-def evaluate(model, dataloader, device):
+def evaluate(model, loader, device):
     model.eval()
-    preds, labels = [], []
+    y_true, y_prob = [], []
+    
     with torch.no_grad():
-        for x_raw, x_fft, x_wav, y in dataloader:
+        for x_raw, x_fft, x_wav, y in loader:
             x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
             logits = model(x_raw, x_fft, x_wav)
             prob = torch.softmax(logits, dim=1)[:, 1]
-            preds.append(prob.cpu())
-            labels.append(y)
-
-    preds = torch.cat(preds).numpy()
-    labels = torch.cat(labels).numpy()
-    acc = accuracy_score(labels, preds >= 0.5)
-    try:
-        auc = roc_auc_score(labels, preds)
-    except ValueError:
-        auc = float('nan')
-    return acc, auc, labels, (preds >= 0.5).astype(int)
-
+            y_true.extend(y.cpu().numpy())
+            y_prob.extend(prob.cpu().numpy())
+    
+    # Calculate metrics
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    optimal_idx = np.argmax(tpr - fpr)
+    threshold = thresholds[optimal_idx]
+    y_pred = (np.array(y_prob) >= threshold).astype(int)
+    
+    return {
+        "loss": log_loss(y_true, y_prob),
+        "accuracy": accuracy_score(y_true, y_pred),
+        "auc": roc_auc_score(y_true, y_prob),
+        "report": classification_report(y_true, y_pred, target_names=['Real', 'Fake']),
+        "threshold": threshold,
+        "y_true": y_true,
+        "y_prob": y_prob
+    }
 
 def main():
-    warnings.filterwarnings("ignore")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    base = "/kaggle/input/the-fake-or-real-dataset/for-2sec/for-2seconds"
-    train_ds = FolderAudioDataset(os.path.join(base, "training"), augment=True)
-    val_ds = FolderAudioDataset(os.path.join(base, "validation"), augment=False)
-
-    batch_size = 128
-    num_workers = min(4, multiprocessing.cpu_count())
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_fn, num_workers=num_workers)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            collate_fn=collate_fn, num_workers=num_workers)
-
-    model = TBranchDetector().to(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load all datasets
+    print("Loading datasets")
+    train_data = (
+        load_fakeorreal() + 
+        load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + 
+        load_asvspoof(CONFIG["data_splits"]["asvspoof"]) + 
+        load_mlaad(CONFIG["data_splits"]["mlaad"])
+    )
+    val_data = get_valset()
+    
+    # Count classes for weighting
+    class_counts = defaultdict(int)
+    for _, label in train_data:
+        class_counts[label] += 1
+    total = sum(class_counts.values())
+    class_weights = torch.tensor([
+        class_counts[0]/total, 
+        class_counts[1]/total 
+    ], device=device)
+    
+    train_ds = AudioDataset(train_data, augment=True, is_training=True)
+    val_ds = AudioDataset(val_data, augment=False)
+    
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=CONFIG["batch_size"],
+        shuffle=True,
+        num_workers=multiprocessing.cpu_count(),
+        pin_memory=True,
+        persistent_workers=True
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=CONFIG["batch_size"],
+        shuffle=False,
+        num_workers=multiprocessing.cpu_count()
+    )
+    
+    model = TBranchDetector(
+        drop_rate=CONFIG["drop_rate"],
+        attn_drop_rate=CONFIG["attn_drop_rate"]
+    ).to(device)
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
-
-    class_weights = torch.tensor([1.0, 1.0], device=device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    optimizer = optim.Adam(model.parameters(), lr=(4e-4)*batch_size/16, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
-
-    best_loss = float("inf")
-    patience = 10
-    for epoch in range(1, 50):
-        print(f"\nEpoch {epoch}/50")
-        train_loss = train_1epoch(model, train_loader, criterion, optimizer, device)
-        print(f"Train Loss: {train_loss:.4f}")
-
-        val_loss = 0
-        model.eval()
-        with torch.no_grad():
-            for x_raw, x_fft, x_wav, y in val_loader:
-                x_raw, x_fft, x_wav, y = x_raw.to(device), x_fft.to(device), x_wav.to(device), y.to(device)
-                out = model(x_raw, x_fft, x_wav)
-                val_loss += criterion(out, y).item() * y.size(0)
-        val_loss /= len(val_loader.dataset)
-
-        acc, auc, _, _ = evaluate(model, val_loader, device)
-        print(f"Val Loss: {val_loss:.4f} | Acc: {acc:.4f} | AUC: {auc:.4f}")
-        scheduler.step(val_loss)
-
-        if val_loss < best_loss:
-            best_loss = val_loss
+        print(f"Using {torch.cuda.device_count()} GPUs")
+    
+    # Optimization
+    criterion = HybridLoss(class_weights)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=CONFIG["lr"],
+        weight_decay=CONFIG["weight_decay"]
+    )
+    scheduler = torch.optim.lr_scheduler.CyclicLR(
+        optimizer,
+        base_lr=1e-5,
+        max_lr=3e-4,
+        step_size_up=500,
+        mode='exp_range'
+    )
+    
+    # Training
+    best_auc = 0.0
+    patience_counter = 0
+    
+    for epoch in range(1, CONFIG["num_epochs"] + 1):
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+        val_metrics = evaluate(model, val_loader, device)
+        scheduler.step()
+        
+        print(f"\nEpoch {epoch}/{CONFIG['num_epochs']}")
+        print(f"Train Loss: {train_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
+        print(f"Val Loss: {val_metrics['loss']:.4f}")
+        print(f"Accuracy: {val_metrics['accuracy']:.4f} | AUC: {val_metrics['auc']:.4f}")
+        print(f"Optimal Threshold: {val_metrics['threshold']:.4f}")
+        print(val_metrics["report"])
+        
+        # Save best model
+        if val_metrics["auc"] > best_auc:
+            best_auc = val_metrics["auc"]
             torch.save(model.state_dict(), "best_model.pth")
-            print("  *** New best model saved ***")
+            patience_counter = 0
+            print("*** New best model saved ***")
         else:
-            patience -= 1
-            if patience == 0:
-                print("Early stopping.")
+            patience_counter += 1
+            if patience_counter >= CONFIG["patience"]:
+                print(f"Early stopping at epoch {epoch}")
                 break
-
+    
+    # Final evaluation
     model.load_state_dict(torch.load("best_model.pth"))
-    acc, auc, y_true, y_pred = evaluate(model, val_loader, device)
+    final_metrics = evaluate(model, val_loader, device)
+    
     print("\nFinal Evaluation")
-    print(f"Accuracy: {acc:.4f}, AUC: {auc:.4f}")
-    print(classification_report(y_true, y_pred, target_names=['Real', 'Fake']))
-
+    print(f"Best AUC: {best_auc:.4f}")
+    print(f"Optimal Threshold: {final_metrics['threshold']:.4f}")
+    print(final_metrics["report"])
+    
+    # Plot ROC
+    plt.figure(figsize=(8, 6))
+    fpr, tpr, _ = roc_curve(final_metrics["y_true"], final_metrics["y_prob"])
+    plt.plot(fpr, tpr, label=f'AUC = {final_metrics["auc"]:.4f}')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve')
+    plt.legend()
+    plt.savefig('roc_curve.png')
 
 if __name__ == "__main__":
     main()

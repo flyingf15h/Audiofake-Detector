@@ -80,41 +80,33 @@ class AST(nn.Module):
 
 
 class WaveletTransform(nn.Module):
-    def __init__(self, wavelet='db4', max_level=5):
+    def __init__(self, wavelet='db4', level=5):
         super().__init__()
         self.wavelet = wavelet
-        self.max_level = max_level
+        self.level = level
+        self._init_filters()
+        
+    def _init_filters(self):
+        dec_lo, dec_hi, _, _ = pywt.Wavelet(self.wavelet).filter_bank
+        self.register_buffer('dec_lo', torch.tensor(dec_lo).float())
+        self.register_buffer('dec_hi', torch.tensor(dec_hi).float())
         
     def forward(self, x):
-        # Applies wavelet packet transform to audio
-        # Args x = Input audio tensor (B, 1, T)
-        # Returns wavelet coefficients arranged as 2D tensor (B, 1, H, W)
-        batch_size = x.shape[0]
-        wavelets = []
+        # x: (B, 1, T)
+        B, _, T = x.shape
+        pad = len(self.dec_lo) // 2
+        x = F.pad(x, (pad, pad), mode='reflect')
         
-        for i in range(batch_size):
-            audio = x[i, 0].detach().cpu().numpy()
+        coeffs = []
+        for _ in range(self.level):
+            # 1D convolution with wavelet filters
+            low = F.conv1d(x, self.dec_lo.view(1, 1, -1), stride=2)
+            high = F.conv1d(x, self.dec_hi.view(1, 1, -1), stride=2)
+            coeffs.append(high)
+            x = low
             
-            # Wavelet packet decomposition before getting the coefficients
-            wp = pywt.WaveletPacket(audio, self.wavelet, maxlevel=self.max_level)
-            coeffs = []
-            for node in wp.get_level(self.max_level):
-                coeffs.append(node.data)
-            
-            # Arrange to 2D grid and make it square
-            coeffs = np.array(coeffs)
-            target_size = int(np.sqrt(coeffs.shape[0]) * coeffs.shape[1])
-            if coeffs.size < target_size * target_size:
-                coeffs = np.pad(coeffs.flatten(), (0, target_size * target_size - coeffs.size))
-            else:
-                coeffs = coeffs.flatten()[:target_size * target_size]
-            
-            coeffs = coeffs.reshape(target_size, target_size)
-            wavelets.append(coeffs)
-        
-        wavelets = torch.tensor(np.array(wavelets), dtype=torch.float32).unsqueeze(1)
-        return wavelets.to(x.device)
-
+        # Stack and reshape coefficients
+        return torch.stack(coeffs, dim=1)  # (B, level, T//2^level)
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
