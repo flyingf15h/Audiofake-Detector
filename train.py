@@ -203,7 +203,7 @@ class HybridLoss(nn.Module):
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
-    scaler = torch.amp.GradScaler(device_type='cuda')  
+    scaler = torch.amp.GradScaler()  
 
     for x_raw, x_fft, x_wav, y in loader:
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
@@ -211,7 +211,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         
         optimizer.zero_grad()
 
-        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+        with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y)
 
