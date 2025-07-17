@@ -47,6 +47,12 @@ def prep_input_array(audio_arr, is_training=False):
     
     stft = librosa.stft(audio_arr, n_fft=n_fft, hop_length=hop_length)
     mag = np.abs(stft)[:128, :128]
+
+    if mag.shape[1] < 128:
+        mag = np.pad(mag, ((0,0), (0,128-mag.shape[1])))
+    elif mag.shape[1] > 128:
+        mag = mag[:,:128]
+
     x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
     
     coeffs = pywt.wavedec(audio_arr, 'db4', level=4)
@@ -197,7 +203,7 @@ class HybridLoss(nn.Module):
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler(device_type='cuda')  
 
     for x_raw, x_fft, x_wav, y in loader:
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
@@ -205,7 +211,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         
         optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y)
 
@@ -287,10 +293,11 @@ def main():
         drop_rate=CONFIG["drop_rate"],
         attn_drop_rate=CONFIG["attn_drop_rate"]
     ).to(device)
+
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
         print(f"Using {torch.cuda.device_count()} GPUs")
-    
+        
     # Optimization
     criterion = HybridLoss(class_weights)
     optimizer = optim.AdamW(

@@ -291,9 +291,16 @@ class TBranchDetector(nn.Module):
             nn.init.constant_(m.weight, 1.0)
     
     def resize_spectrogram(self, spec, target_size=224):
+        if spec.dim() == 3:
+            spec = spec.unsqueeze(1) 
         return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
     
     def forward(self, x_raw, x_fft, x_wav):
+        if isinstance(self, nn.DataParallel):
+            x_raw = x_raw.squeeze(0) if x_raw.dim() == 4 else x_raw
+            x_fft = x_fft.squeeze(0) if x_fft.dim() == 5 else x_fft
+            x_wav = x_wav.squeeze(0) if x_wav.dim() == 5 else x_wav
+
         fft_resized = self.resize_spectrogram(x_fft, target_size=224)  
         ast_specfeat = self.ast_spectrogram(fft_resized)  # (B, embed_dim)
 
