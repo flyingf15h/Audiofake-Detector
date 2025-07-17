@@ -239,7 +239,9 @@ class TBranchDetector(nn.Module):
                  ast_embed_dim=768,
                  ast_depth=12,
                  ast_num_heads=12,
-                 fusion_hidden_dim=256):
+                 fusion_hidden_dim=256,
+                 drop_rate=0.1,     
+                 attn_drop_rate=0.1):
         super().__init__()
         
         self.spectrogram_extractor = SpectrogramExtractor(sample_rate=sample_rate)
@@ -250,7 +252,9 @@ class TBranchDetector(nn.Module):
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
-            num_heads=ast_num_heads
+            num_heads=ast_num_heads,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate
         )
         
         self.ast_wavelet = AST(
@@ -258,7 +262,9 @@ class TBranchDetector(nn.Module):
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
-            num_heads=ast_num_heads
+            num_heads=ast_num_heads,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate  
         )
         
         self.cnn_raw = RawCNN(input_length=input_length)
