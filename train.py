@@ -33,8 +33,7 @@ CONFIG = {
     "hop_length_eval": 128,
     "data_splits": {
         "in_the_wild": 0.7,
-        "asvspoof": 0.3,
-        "mlaad": 0.5
+        "asvspoof": 1.0,
     }
 }
 
@@ -165,16 +164,6 @@ def load_asvspoof(split_ratio= 1.0):
     print(f"Using {len(train_files)} samples for training")
     return train_files
 
-def load_mlaad(split_ratio=0.5):
-    # Load MLAAD dataset from HuggingFace
-    dataset = load_dataset("mueller91/MLAAD", split="train")
-    train_data, _ = train_test_split(dataset, train_size=split_ratio)
-    
-    return [
-        (item["audio"], 0 if item["label"] == "real" else 1)
-        for item in train_data
-    ]
-
 def get_valset():
     # Get FOR validation set
     base_path = "/kaggle/input/the-fake-or-real-dataset"
@@ -260,7 +249,6 @@ def main():
         load_fakeorreal() + 
         load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + 
         load_asvspoof(CONFIG["data_splits"]["asvspoof"]) + 
-        load_mlaad(CONFIG["data_splits"]["mlaad"])
     )
     val_data = get_valset()
     

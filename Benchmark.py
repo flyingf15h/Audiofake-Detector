@@ -137,7 +137,7 @@ def load_asvspoof(max_samples=1000):
     print(f"Checking protocol at: {protocol_path}")
     print(f"Checking FLAC files at: {flac_dir}")
 
-    
+
     # Mapping from filename to label
     file_labels = {}
     with open(protocol_path, 'r') as f:
@@ -167,14 +167,6 @@ def load_asvspoof(max_samples=1000):
     
     return files
 
-def load_mlaad(max_samples=200):
-    dataset = list(reversed(load_dataset("mueller91/MLAAD", split="test")))
-    if max_samples and len(dataset) > max_samples:
-        dataset = dataset[:max_samples]
-    return [
-        (item["audio"], 0 if item["label"] == "real" else 1)
-        for item in dataset
-    ]
 
 def evaluate(dataloader, name="Dataset"):
     y_true, y_prob = [], []
@@ -222,7 +214,6 @@ if __name__ == "__main__":
         "FOR-Original": load_for_original(max_samples=1000),
         "In-the-Wild": load_in_the_wild(max_samples=300),
         "ASVspoof": load_asvspoof(max_samples=700),
-        "MLAAD": load_mlaad(max_samples=200),
     }
     
     for name, data in datasets.items():
