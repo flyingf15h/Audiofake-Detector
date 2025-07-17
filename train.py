@@ -123,7 +123,7 @@ def load_inthewild(split_ratio=0.7):
     
     return [(str(f), 0) for f in train_real] + [(str(f), 1) for f in train_fake]
 
-def load_asvspoof(split_ratio= 1.0):
+def load_asvspoof():
     # Load ASVspoof 2019 
     base_path = "/kaggle/input/asvspoof-2019/LA"
     protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
@@ -159,9 +159,7 @@ def load_asvspoof(split_ratio= 1.0):
     if not files:
         raise ValueError("No valid files found - check protocol/flac matching")
     
-    train_files, _ = train_test_split(files, train_size=split_ratio, random_state=42)
-    print(f"Using {len(train_files)} samples for training")
-    return train_files
+    return files
 
 def get_valset():
     # Get FOR validation set
