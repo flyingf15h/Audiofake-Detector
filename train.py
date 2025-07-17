@@ -131,26 +131,38 @@ def load_asvspoof(split_ratio= 1.0):
     protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
     flac_dir = Path(f"{base_path}/ASVspoof2019_LA_train/flac")
     
-    # Mapping from filename to label
+
+    print(f"Checking protocol at: {protocol_path}")
+    print(f"Checking FLAC files at: {flac_dir}")
+
+
+    # Read protocol file
     file_labels = {}
     with open(protocol_path, 'r') as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) >= 5:
-                file_id = parts[1]
-                label = 0 if parts[4] == 'bonafide' else 1  
-                file_labels[file_id] = label
-    
+            if len(parts) >= 5: 
+                file_id = parts[1]  
+                label = 0 if parts[4] == 'bonafide' else 1
+                file_labels[file_id + ".flac"] = label 
+    print(f"Found {len(file_labels)} entries in protocol")
+
     # Pair files with labels
     files = []
+    missing_files = 0
     for flac_file in flac_dir.glob("*.flac"):
-        file_id = flac_file.stem
-        if file_id in file_labels:
-            files.append((str(flac_file), file_labels[file_id]))
+        if flac_file.name in file_labels:
+            files.append((str(flac_file), file_labels[flac_file.name]))
         else:
-            print(f"Warning: No label found for {file_id}")
+            missing_files += 1
+    
+    print(f"Matched {len(files)} files (missing labels for {missing_files} files)")
+    
+    if not files:
+        raise ValueError("No valid files found - check protocol/flac matching")
     
     train_files, _ = train_test_split(files, train_size=split_ratio, random_state=42)
+    print(f"Using {len(train_files)} samples for training")
     return train_files
 
 def load_mlaad(split_ratio=0.5):

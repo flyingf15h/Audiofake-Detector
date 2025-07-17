@@ -134,6 +134,10 @@ def load_asvspoof(max_samples=1000):
     protocol_path = f"{base}/ASVspoof2021_LA_cm_protocols/ASVspoof2021.LA.cm.eval.trl.txt"
     flac_dir = Path(f"{base}/ASVspoof2021_LA_eval/flac")
     
+    print(f"Checking protocol at: {protocol_path}")
+    print(f"Checking FLAC files at: {flac_dir}")
+
+    
     # Mapping from filename to label
     file_labels = {}
     with open(protocol_path, 'r') as f:
