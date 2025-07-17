@@ -295,14 +295,14 @@ class TBranchDetector(nn.Module):
     
     def forward(self, x_raw, x_fft, x_wav):
         fft_resized = self.resize_spectrogram(x_fft, target_size=224)  
-        ast_spec_features = self.ast_spectrogram(fft_resized)  # (B, embed_dim)
+        ast_specfeat = self.ast_spectrogram(fft_resized)  # (B, embed_dim)
 
         wav_resized = self.resize_spectrogram(x_wav, target_size=224)
-        ast_wavelet_features = self.ast_wavelet(wav_resized)  # (B, embed_dim)
+        ast_wavefeat = self.ast_wavelet(wav_resized)  # (B, embed_dim)
 
         cnn_features = self.cnn_raw(x_raw)  # (B, 512)
 
-        all_features = [ast_spec_features, ast_wavelet_features, cnn_features]
+        all_features = [ast_specfeat, ast_wavefeat, cnn_features]
         fused_features = self.fusion(all_features)  # (B, fusion_hidden_dim)
 
         logits = self.classifier(fused_features)  # (B, num_classes)
@@ -310,15 +310,28 @@ class TBranchDetector(nn.Module):
 
     
     def getbranch_features(self, x_raw, x_fft, x_wav):
+        if isinstance(self, nn.DataParallel):
+            device = next(self.module.parameters()).device
+        else:
+            device = next(self.parameters()).device
+            
+        x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
+
+        if isinstance(self, nn.DataParallel):
+            return self.module.gbf(x_raw, x_fft, x_wav)
+        else:
+            return self.gbf(x_raw, x_fft, x_wav)
+        
+    def gbf(self, x_raw, x_fft, x_wav):
         fft_resized = self.resize_spectrogram(x_fft, target_size=224)
-        ast_spec_features = self.ast_spectrogram(fft_resized)
+        ast_specfeat = self.ast_spectrogram(fft_resized)
 
         wav_resized = self.resize_spectrogram(x_wav, target_size=224)
-        ast_wavelet_features = self.ast_wavelet(wav_resized)
+        ast_wavefeat = self.ast_wavelet(wav_resized)
 
         cnn_features = self.cnn_raw(x_raw)
-
-        return ast_spec_features, ast_wavelet_features, cnn_features
+        
+        return ast_specfeat, ast_wavefeat, cnn_features
 
 
 def create_model(sample_rate=16000, input_length=16000, num_classes=2):

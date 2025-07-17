@@ -54,9 +54,9 @@ def prep_input_array(audio_arr, is_training=False):
     x_wav = (cA4 - np.mean(cA4)) / (np.std(cA4) + 1e-8)
     
     return (
-        torch.tensor(x_raw).unsqueeze(0).float(),
-        torch.tensor(x_fft).unsqueeze(0).float(),
-        torch.tensor(x_wav).unsqueeze(0).float()
+        torch.tensor(x_raw).unsqueeze(0).unsqueeze(0).float(),
+        torch.tensor(x_fft).unsqueeze(0).unsqueeze(0).float(),
+        torch.tensor(x_wav).unsqueeze(0).unsqueeze(0).float()
     )
 
 class AudioDataset(Dataset):
@@ -186,27 +186,37 @@ class HybridLoss(nn.Module):
     def __init__(self, class_weights):
         super().__init__()
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights)
-        self.focal_loss = FocalLoss(gamma=2, alpha=class_weights[1].item())
+        self.focal_loss = FocalLoss(gamma=2)
+        self.class_weights = class_weights
         
     def forward(self, logits, targets):
-        return 0.7 * self.ce_loss(logits, targets) + 0.3 * self.focal_loss(logits, targets)
+        ce_loss = self.ce_loss(logits, targets)
+        focal_loss = self.focal_loss(logits, targets, weight=self.class_weights)
+        return 0.7 * ce_loss + 0.3 * focal_loss
 
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
+    scaler = torch.cuda.amp.GradScaler()  
+
     for x_raw, x_fft, x_wav, y in loader:
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
         y = y.to(device)
         
         optimizer.zero_grad()
-        logits = model(x_raw, x_fft, x_wav)
-        loss = criterion(logits, y)
-        loss.backward()
+
+        with torch.amp.autocast(): 
+            logits = model(x_raw, x_fft, x_wav)
+            loss = criterion(logits, y)
+
+            scaler.scale(loss).backward() 
+            scaler.unscale_(optimizer)  
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)  
+            scaler.update() 
         
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        total_loss += loss.item() * x_raw.size(0)
+            total_loss += loss.item() * x_raw.size(0)
     return total_loss / len(loader.dataset)
 
 def evaluate(model, loader, device):
