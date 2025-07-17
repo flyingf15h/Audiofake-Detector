@@ -33,7 +33,6 @@ CONFIG = {
     "hop_length_eval": 128,
     "data_splits": {
         "in_the_wild": 0.7,
-        "asvspoof": 1.0,
     }
 }
 
@@ -245,7 +244,7 @@ def main():
     
     # Load all datasets
     print("Loading datasets")
-    train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof(CONFIG["data_splits"]["asvspoof"])
+    train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
     val_data = get_valset()
     
     # Count classes for weighting
