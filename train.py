@@ -16,7 +16,10 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import gc
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
+import os
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 # Configuration
 CONFIG = {
@@ -232,7 +235,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
-    scaler = GradScaler('cuda')
+    scaler = GradScaler(device_type='cuda')
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         if x_raw.dim() == 2:
@@ -242,7 +245,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         y = y.to(device)
         
         # Forward pass with autocast
-        with autocast(device_type='cuda'):
+        with autocast('cuda'): 
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y) / CONFIG["accumulation_steps"]
         
