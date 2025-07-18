@@ -20,7 +20,7 @@ from sklearn.model_selection import train_test_split
 # Configuration
 CONFIG = {
     "sample_rate": 16000,
-    "batch_size": 128,
+    "batch_size": 64,
     "num_epochs": 50,
     "lr": 3e-5,
     "weight_decay": 0.05,
