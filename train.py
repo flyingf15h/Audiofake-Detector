@@ -62,7 +62,7 @@ def prep_input_array(audio_arr, is_training=False):
     x_wav = (cA4 - np.mean(cA4)) / (np.std(cA4) + 1e-8)
     
     return (
-        torch.tensor(x_raw).unsqueeze(0).unsqueeze(0).float(),
+        torch.tensor(x_raw).unsqueeze(0).float(),  
         torch.tensor(x_fft).unsqueeze(0).unsqueeze(0).float(),
         torch.tensor(x_wav).unsqueeze(0).unsqueeze(0).float()
     )
@@ -86,14 +86,31 @@ class AudioDataset(Dataset):
                 
             if self.augment:
                 audio = self._augment(audio)
-            return *prep_input_array(audio, self.is_training), label
+            
+            x_raw, x_fft, x_wav = prep_input_array(audio, self.is_training)
+            x_raw = x_raw.squeeze() 
+            
+            # [1, height, width]
+            if x_fft.dim() == 4:
+                x_fft = x_fft.squeeze(0)
+            elif x_fft.dim() == 2:
+                x_fft = x_fft.unsqueeze(0)
+                
+            # [1, height, width]
+            if x_wav.dim() == 4:
+                x_wav = x_wav.squeeze(0)
+            elif x_wav.dim() == 2:
+                x_wav = x_wav.unsqueeze(0)
+                
+            return x_raw, x_fft, x_wav, label
+            
         except Exception as e:
             print(f"Error loading {path}: {str(e)}")
             return (
-                torch.zeros(1, 16000),
-                torch.zeros(1, 128, 128),
-                torch.zeros(1, 64, 128),
-                0  # Default to real class
+                torch.zeros(16000),        # [16000]
+                torch.zeros(1, 128, 128),  # [1, 128, 128]
+                torch.zeros(1, 64, 128),   # [1, 64, 128]
+                0                         # label
             )
 
     def _augment(self, audio):
@@ -208,6 +225,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
     optimizer.zero_grad()
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
+
+        if x_raw.dim() == 2:
+            x_raw = x_raw.unsqueeze(1)
+
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
         y = y.to(device)
         
