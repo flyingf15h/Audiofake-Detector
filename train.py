@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from datasets import load_dataset
 from focal_loss.focal_loss import FocalLoss
 from sklearn.model_selection import train_test_split
+import gc
 
 # Configuration
 CONFIG = {
@@ -33,7 +34,8 @@ CONFIG = {
     "hop_length_eval": 128,
     "data_splits": {
         "in_the_wild": 0.7,
-    }
+    },
+    "accumulation_steps": 2
 }
 
 def prep_input_array(audio_arr, is_training=False):
@@ -203,26 +205,32 @@ class HybridLoss(nn.Module):
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
-    scaler = torch.amp.GradScaler()  
-
-    for x_raw, x_fft, x_wav, y in loader:
+    optimizer.zero_grad()
+    
+    for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
         y = y.to(device)
         
-        optimizer.zero_grad()
-
-        with torch.amp.autocast('cuda', dtype=torch.float16):
-            logits = model(x_raw, x_fft, x_wav)
-            loss = criterion(logits, y)
-
-            scaler.scale(loss).backward() 
-            scaler.unscale_(optimizer)  
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)  
-            scaler.update() 
+        # Forward pass
+        logits = model(x_raw, x_fft, x_wav)
+        loss = criterion(logits, y) / CONFIG["accumulation_steps"]  
         
-            total_loss += loss.item() * x_raw.size(0)
+        # Backward pass
+        loss.backward()
+        
+        # Update weights after accumulation_steps
+        if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+        
+        total_loss += loss.item() * x_raw.size(0) * CONFIG["accumulation_steps"]
+        
+        # Memory cleanup
+        del logits, loss, x_raw, x_fft, x_wav, y
+        torch.cuda.empty_cache()
+        gc.collect()
+    
     return total_loss / len(loader.dataset)
 
 def evaluate(model, loader, device):
@@ -232,10 +240,20 @@ def evaluate(model, loader, device):
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
             x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
-            logits = model(x_raw, x_fft, x_wav)
-            prob = torch.softmax(logits, dim=1)[:, 1]
-            y_true.extend(y.cpu().numpy())
-            y_prob.extend(prob.cpu().numpy())
+            
+            chunk_size = 8  
+            for i in range(0, x_raw.size(0), chunk_size):
+                chunk_raw = x_raw[i:i+chunk_size]
+                chunk_fft = x_fft[i:i+chunk_size]
+                chunk_wav = x_wav[i:i+chunk_size]
+                
+                logits = model(chunk_raw, chunk_fft, chunk_wav)
+                prob = torch.softmax(logits, dim=1)[:, 1]
+                y_true.extend(y[i:i+chunk_size].cpu().numpy())
+                y_prob.extend(prob.cpu().numpy())
+                
+                del chunk_raw, chunk_fft, chunk_wav, logits, prob
+                torch.cuda.empty_cache()
     
     # Calculate metrics
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -255,6 +273,7 @@ def evaluate(model, loader, device):
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     
     # Load all datasets
     print("Loading datasets")
@@ -340,7 +359,9 @@ def main():
             if patience_counter >= CONFIG["patience"]:
                 print(f"Early stopping at epoch {epoch}")
                 break
+        
         torch.cuda.empty_cache()
+        gc.collect()
     
     # Final evaluation
     model.load_state_dict(torch.load("best_model.pth"))
