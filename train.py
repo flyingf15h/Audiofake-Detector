@@ -96,8 +96,8 @@ class AudioDataset(Dataset):
                 
             return (
                 x_raw.squeeze(0),      
-                x_fft.unsqueeze(0),    
-                x_wav.unsqueeze(0),    
+                x_fft.squeeze(0),    
+                x_wav.squeeze(0),    
                 label
             )
             
@@ -276,9 +276,9 @@ def evaluate(model, loader, device):
     
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
-            if x_raw.dim() == 2:
-                x_raw = x_raw.unsqueeze(1) 
-            x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
+            x_raw = x_raw.unsqueeze(1).to(device)      # [B,1,16000]
+            x_fft = x_fft.unsqueeze(1).to(device)      # [B,1,128,128]
+            x_wav = x_wav.unsqueeze(1).to(device)      # [B,1,64,128]
             
             chunk_size = 8  
             for i in range(0, x_raw.size(0), chunk_size):
@@ -365,10 +365,9 @@ def main():
     with torch.no_grad():
         test_inputs = (
             test_batch[0].unsqueeze(1).to(device),  # [B,1,16000]
-            test_batch[1].to(device),               # [B,1,128,128] 
-            test_batch[2].to(device)                # [B,1,64,128] 
+            test_batch[1].unsqueeze(1).to(device),  # [B,1,128,128]
+            test_batch[2].unsqueeze(1).to(device)   # [B,1,64,128]
         )
-        
         test_output = model(*test_inputs)
         print(f"Model test output shape: {test_output.shape}")
 
