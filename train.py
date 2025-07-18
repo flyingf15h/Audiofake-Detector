@@ -46,6 +46,7 @@ def prep_input_array(audio_arr, is_training=False):
     audio_arr = librosa.util.fix_length(audio_arr, size=16000)
     
     x_raw = (audio_arr - np.mean(audio_arr)) / (np.std(audio_arr) + 1e-8)
+    x_raw = torch.tensor(x_raw).unsqueeze(0).float()
     
     n_fft = CONFIG["n_fft_train"] if is_training else CONFIG["n_fft_eval"]
     hop_length = CONFIG["hop_length_train"] if is_training else CONFIG["hop_length_eval"]
@@ -105,7 +106,12 @@ class AudioDataset(Dataset):
             elif x_wav.dim() == 2:
                 x_wav = x_wav.unsqueeze(0)
                 
-            return x_raw, x_fft, x_wav, label
+            return (
+                x_raw.squeeze(0), 
+                x_fft.squeeze(0),
+                x_wav.squeeze(0), 
+                label
+            )
             
         except Exception as e:
             print(f"Error loading {path}: {str(e)}")
@@ -238,6 +244,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
     scaler = GradScaler()
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
+        x_raw = x_raw.unsqueeze(1)  # [batch, 1, 16000]
+        x_fft = x_fft.float()       # [batch, 1, 128, 128]
+        x_wav = x_wav.float()       
+
         if x_raw.dim() == 2:
             x_raw = x_raw.unsqueeze(1)
 
@@ -343,6 +353,11 @@ def main():
         shuffle=False,
         num_workers=multiprocessing.cpu_count()
     )
+    
+    print("\nVerifying batch shapes:")
+    test_batch = next(iter(train_loader))
+    shapes = [t.shape for t in test_batch[:-1]]  # Exclude labels
+    print(f"Raw audio: {shapes[0]}, FFT: {shapes[1]}, Wavelet: {shapes[2]}")
     
     model = TBranchDetector(
         drop_rate=CONFIG["drop_rate"],

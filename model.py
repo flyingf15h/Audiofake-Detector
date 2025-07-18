@@ -309,6 +309,10 @@ class TBranchDetector(nn.Module):
         return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
     
     def forward(self, x_raw, x_fft, x_wav):
+        assert x_raw.dim() == 3, f"Expected raw audio shape [B,1,L], got {x_raw.shape}"
+        assert x_fft.dim() == 4, f"Expected FFT shape [B,1,H,W], got {x_fft.shape}"
+        assert x_wav.dim() == 4, f"Expected wavelet shape [B,1,H,W], got {x_wav.shape}"
+        
         if isinstance(self, nn.DataParallel):
             x_raw = x_raw.squeeze(0) if x_raw.dim() == 4 else x_raw
             x_fft = x_fft.squeeze(0) if x_fft.dim() == 5 else x_fft
