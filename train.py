@@ -216,7 +216,7 @@ class HybridLoss(nn.Module):
         
     def forward(self, logits, targets):
         ce_loss = self.ce_loss(logits, targets)
-        focal_loss = self.focal_loss(logits, targets, weight=self.class_weights)
+        focal_loss = self.focal_loss(logits, targets)
         return 0.7 * ce_loss + 0.3 * focal_loss
 
 def train_epoch(model, loader, criterion, optimizer, device):
