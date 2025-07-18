@@ -235,7 +235,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
-    scaler = GradScaler(device_type='cuda')
+    scaler = GradScaler()
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         if x_raw.dim() == 2:
@@ -245,14 +245,14 @@ def train_epoch(model, loader, criterion, optimizer, device):
         y = y.to(device)
         
         # Forward pass with autocast
-        with autocast('cuda'): 
+        with autocast(): 
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y) / CONFIG["accumulation_steps"]
         
         # Backward pass with scaler
         scaler.scale(loss).backward()
         
-        # Update weights after accumulation_steps
+        # Update weights
         if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
