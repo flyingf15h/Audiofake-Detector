@@ -232,18 +232,18 @@ def train_epoch(model, loader, criterion, optimizer, device):
     scaler = GradScaler()
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
-        x_raw = x_raw.unsqueeze(1)  # [batch, 1, 16000]
-        x_fft = x_fft.float()       # [batch, 1, 128, 128]
-        x_wav = x_wav.float()       
-
-        if x_raw.dim() == 2:
-            x_raw = x_raw.unsqueeze(1)
-
-        x_fft = x_fft.float() 
-        x_wav = x_wav.float()
-
-        x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
+        x_raw = x_raw.float().to(device)
+        x_fft = x_fft.float().to(device)
+        x_wav = x_wav.float().to(device)
         y = y.to(device)
+        
+        # Add channel dimension if missing
+        if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
+            x_raw = x_raw.unsqueeze(1)
+        if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
+            x_fft = x_fft.unsqueeze(1)
+        if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
+            x_wav = x_wav.unsqueeze(1)
         
         # Forward pass with autocast
         with autocast(device_type='cuda'): 
@@ -276,9 +276,16 @@ def evaluate(model, loader, device):
     
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
-            x_raw = x_raw.unsqueeze(1).to(device)      # [B,1,16000]
-            x_fft = x_fft.unsqueeze(1).to(device)      # [B,1,128,128]
-            x_wav = x_wav.unsqueeze(1).to(device)      # [B,1,64,128]
+            x_raw = x_raw.float().to(device)
+            x_fft = x_fft.float().to(device)
+            x_wav = x_wav.float().to(device)
+            
+            if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
+                x_raw = x_raw.unsqueeze(1)
+            if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
+                x_fft = x_fft.unsqueeze(1)
+            if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
+                x_wav = x_wav.unsqueeze(1)
             
             chunk_size = 8  
             for i in range(0, x_raw.size(0), chunk_size):
