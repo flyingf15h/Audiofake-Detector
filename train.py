@@ -17,6 +17,7 @@ from datasets import load_dataset
 from focal_loss.focal_loss import FocalLoss
 from sklearn.model_selection import train_test_split
 import gc
+import torch.nn.functional as F
 
 # Configuration
 CONFIG = {
@@ -211,12 +212,21 @@ class HybridLoss(nn.Module):
     def __init__(self, class_weights):
         super().__init__()
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights)
-        self.focal_loss = FocalLoss(gamma=2)
-        self.class_weights = class_weights
+        self.gamma = 2
+        self.class_weights = class_weights 
         
     def forward(self, logits, targets):
         ce_loss = self.ce_loss(logits, targets)
-        focal_loss = self.focal_loss(logits, targets)
+
+        ce = F.cross_entropy(logits, targets, reduction='none')
+        pt = torch.exp(-ce)
+        focal_loss = ((1 - pt) ** self.gamma) * ce
+
+        if self.class_weights is not None:
+            focal_loss = focal_loss * self.class_weights[targets]
+            
+        focal_loss = focal_loss.mean()
+        
         return 0.7 * ce_loss + 0.3 * focal_loss
 
 def train_epoch(model, loader, criterion, optimizer, device):
