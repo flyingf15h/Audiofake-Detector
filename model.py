@@ -292,6 +292,9 @@ class TBranchDetector(nn.Module):
     
     def resize_spectrogram(self, spec, target_size=224):
         print(f"[resize_spectrogram] Received spec of shape: {spec.shape}, dim: {spec.dim()}")
+        while spec.dim() > 4 and spec.shape[0] == 1:
+            spec = spec.squeeze(0)
+
         if spec.dim() == 3:
             spec = spec.unsqueeze(0)  
         elif spec.dim() == 2:
