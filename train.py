@@ -16,11 +16,12 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import gc
 import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
 
 # Configuration
 CONFIG = {
     "sample_rate": 16000,
-    "batch_size": 64,
+    "batch_size": 32,
     "num_epochs": 50,
     "lr": 3e-5,
     "weight_decay": 0.05,
@@ -34,7 +35,7 @@ CONFIG = {
     "data_splits": {
         "in_the_wild": 0.7,
     },
-    "accumulation_steps": 2
+    "accumulation_steps": 4
 }
 
 def prep_input_array(audio_arr, is_training=False):
@@ -231,26 +232,29 @@ def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
+    scaler = GradScaler('cuda')
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
-
         if x_raw.dim() == 2:
             x_raw = x_raw.unsqueeze(1)
 
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
         y = y.to(device)
         
-        # Forward pass
-        logits = model(x_raw, x_fft, x_wav)
-        loss = criterion(logits, y) / CONFIG["accumulation_steps"]  
+        # Forward pass with autocast
+        with autocast(device_type='cuda'):
+            logits = model(x_raw, x_fft, x_wav)
+            loss = criterion(logits, y) / CONFIG["accumulation_steps"]
         
-        # Backward pass
-        loss.backward()
+        # Backward pass with scaler
+        scaler.scale(loss).backward()
         
         # Update weights after accumulation_steps
         if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
         
         total_loss += loss.item() * x_raw.size(0) * CONFIG["accumulation_steps"]
