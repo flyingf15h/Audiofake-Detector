@@ -42,34 +42,34 @@ CONFIG = {
 }
 
 def prep_input_array(audio_arr, is_training=False):
-    # Audio preprocessing with train/eval consistency
     audio_arr = librosa.util.fix_length(audio_arr, size=16000)
     
+    # Raw audio
     x_raw = (audio_arr - np.mean(audio_arr)) / (np.std(audio_arr) + 1e-8)
-    x_raw = torch.tensor(x_raw).unsqueeze(0).float()
+    x_raw = torch.from_numpy(x_raw).clone().detach().float().unsqueeze(0)  # [1, 16000]
     
+    # STFT
     n_fft = CONFIG["n_fft_train"] if is_training else CONFIG["n_fft_eval"]
     hop_length = CONFIG["hop_length_train"] if is_training else CONFIG["hop_length_eval"]
-    
     stft = librosa.stft(audio_arr, n_fft=n_fft, hop_length=hop_length)
     mag = np.abs(stft)[:128, :128]
-
+    
+    # Padding/trimming
     if mag.shape[1] < 128:
         mag = np.pad(mag, ((0,0), (0,128-mag.shape[1])))
     elif mag.shape[1] > 128:
         mag = mag[:,:128]
-
-    x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
     
+    x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
+    x_fft = torch.from_numpy(x_fft).clone().detach().float().unsqueeze(0)  # [1, 128, 128]
+    
+    # Wavelet
     coeffs = pywt.wavedec(audio_arr, 'db4', level=4)
     cA4 = np.resize(coeffs[0], (64, 128))
     x_wav = (cA4 - np.mean(cA4)) / (np.std(cA4) + 1e-8)
+    x_wav = torch.from_numpy(x_wav).clone().detach().float().unsqueeze(0)  # [1, 64, 128]
     
-    return (
-        torch.tensor(x_raw).unsqueeze(0).float(),  
-        torch.tensor(x_fft).unsqueeze(0).unsqueeze(0).float(),
-        torch.tensor(x_wav).unsqueeze(0).unsqueeze(0).float()
-    )
+    return x_raw, x_fft, x_wav
 
 class AudioDataset(Dataset):
     def __init__(self, file_label_pairs, augment=False, is_training=False):
@@ -93,33 +93,21 @@ class AudioDataset(Dataset):
             
             x_raw, x_fft, x_wav = prep_input_array(audio, self.is_training)
             x_raw = x_raw.squeeze() 
-            
-            # [1, height, width]
-            if x_fft.dim() == 4:
-                x_fft = x_fft.squeeze(0)
-            elif x_fft.dim() == 2:
-                x_fft = x_fft.unsqueeze(0)
-                
-            # [1, height, width]
-            if x_wav.dim() == 4:
-                x_wav = x_wav.squeeze(0)
-            elif x_wav.dim() == 2:
-                x_wav = x_wav.unsqueeze(0)
                 
             return (
-                x_raw.squeeze(0), 
-                x_fft.squeeze(0),
-                x_wav.squeeze(0), 
+                x_raw.squeeze(0),      
+                x_fft.unsqueeze(0),    
+                x_wav.unsqueeze(0),    
                 label
             )
             
         except Exception as e:
             print(f"Error loading {path}: {str(e)}")
             return (
-                torch.zeros(16000),        # [16000]
-                torch.zeros(1, 128, 128),  # [1, 128, 128]
-                torch.zeros(1, 64, 128),   # [1, 64, 128]
-                0                         # label
+                torch.zeros(16000),      
+                torch.zeros(1, 128, 128), 
+                torch.zeros(1, 64, 128),  
+                0                       
             )
 
     def _augment(self, audio):
@@ -353,12 +341,7 @@ def main():
         shuffle=False,
         num_workers=multiprocessing.cpu_count()
     )
-    
-    print("\nVerifying batch shapes:")
-    test_batch = next(iter(train_loader))
-    shapes = [t.shape for t in test_batch[:-1]]  # Exclude labels
-    print(f"Raw audio: {shapes[0]}, FFT: {shapes[1]}, Wavelet: {shapes[2]}")
-    
+
     model = TBranchDetector(
         drop_rate=CONFIG["drop_rate"],
         attn_drop_rate=CONFIG["attn_drop_rate"]
@@ -367,6 +350,21 @@ def main():
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
         print(f"Using {torch.cuda.device_count()} GPUs")
+        
+    print("\nVerifying batch shapes:")
+    test_batch = next(iter(train_loader))
+    print(f"Raw audio: {test_batch[0].shape}")
+    print(f"FFT: {test_batch[1].shape}")
+    print(f"Wavelet: {test_batch[2].shape}")
+    
+    with torch.no_grad():
+        test_inputs = (
+            test_batch[0].unsqueeze(1).to(device),  # [B,1,16000]
+            test_batch[1].unsqueeze(1).to(device),  # [B,1,128,128]
+            test_batch[2].unsqueeze(1).to(device)   # [B,1,64,128]
+        )
+        test_output = model(*test_inputs)
+        print(f"Model test output shape: {test_output.shape}")
         
     # Optimization
     criterion = HybridLoss(class_weights)
