@@ -245,7 +245,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         y = y.to(device)
         
         # Forward pass with autocast
-        with autocast(): 
+        with autocast(device_type='cuda'): 
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y) / CONFIG["accumulation_steps"]
         
