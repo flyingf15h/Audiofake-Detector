@@ -291,10 +291,13 @@ class TBranchDetector(nn.Module):
             nn.init.constant_(m.weight, 1.0)
     
     def resize_spectrogram(self, spec, target_size=224):
+        print(f"[resize_spectrogram] Received spec of shape: {spec.shape}, dim: {spec.dim()}")
         if spec.dim() == 3:
             spec = spec.unsqueeze(0)  
         elif spec.dim() == 2:
             spec = spec.unsqueeze(0).unsqueeze(0) 
+        elif spec.dim() != 4:
+            raise ValueError(f"Expected 4D tensor, got {spec.shape}")
         return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
     
     def forward(self, x_raw, x_fft, x_wav):
