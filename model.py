@@ -291,22 +291,26 @@ class TBranchDetector(nn.Module):
             nn.init.constant_(m.weight, 1.0)
     
     def resize_spectrogram(self, spec, target_size=224):
-        print(f"[resize_spectrogram] Received spec of shape: {spec.shape}, dim: {spec.dim()}")
+    # Properly handles tensor dimensions for model input
         while spec.dim() > 4:
-            for dim in range(1, spec.dim()):
+            squeezed = False
+            for dim in reversed(range(spec.dim())):
                 if spec.shape[dim] == 1:
                     spec = spec.squeeze(dim)
+                    squeezed = True
                     break
-            else:
-                break  
-
-        if spec.dim() == 3:
-            spec = spec.unsqueeze(0)  
-        elif spec.dim() == 2:
-            spec = spec.unsqueeze(0).unsqueeze(0) 
+            
+            if not squeezed:
+                raise ValueError(f"Cannot reduce shape {spec.shape} to 4D - no singleton dimensions found")
+    
+        if spec.dim() == 3:  # [B,H,W] -> [B,1,H,W]
+            spec = spec.unsqueeze(1)
+        elif spec.dim() == 2:  # [H,W] -> [1,1,H,W] 
+            spec = spec.unsqueeze(0).unsqueeze(0)
         elif spec.dim() != 4:
-            raise ValueError(f"Expected 4D tensor, got {spec.shape}")
-        return F.interpolate(spec, size=(target_size, target_size), mode='bilinear', align_corners=False)
+            raise ValueError(f"Cannot handle tensor with {spec.dim()} dimensions, shape: {spec.shape}")
+            
+        return spec
     
     def forward(self, x_raw, x_fft, x_wav):
         assert x_raw.dim() == 3, f"Expected raw audio shape [B,1,L], got {x_raw.shape}"
