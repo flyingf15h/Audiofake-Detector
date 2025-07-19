@@ -359,9 +359,9 @@ def create_model(sample_rate=16000, input_length=16000, num_classes=2):
         num_classes=num_classes,
         ast_img_size=128,
         ast_patch_size=16,
-        ast_embed_dim=768,
-        ast_depth=12,
-        ast_num_heads=12,
+        ast_embed_dim=384,
+        ast_depth=6,
+        ast_num_heads=6,
         fusion_hidden_dim=256
     )
     return model

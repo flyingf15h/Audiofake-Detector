@@ -30,7 +30,7 @@ CONFIG = {
     "weight_decay": 0.05,
     "drop_rate": 0.1,
     "attn_drop_rate": 0.1,
-    "patience": 5,
+    "patience": 8,
     "n_fft_train": 1024,
     "hop_length_train": 512,
     "n_fft_eval": 256,
@@ -390,7 +390,7 @@ def main():
     )
     scheduler = torch.optim.lr_scheduler.CyclicLR(
         optimizer,
-        base_lr=1e-5,
+        base_lr=1e-3,
         max_lr=3e-4,
         step_size_up=500,
         mode='exp_range'
