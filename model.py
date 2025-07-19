@@ -161,14 +161,11 @@ class RawCNN(nn.Module):
         # Args x: Raw waveform (B, 1, T)
         # Returns features (B, feature_dim)
         
-        # First conv layer
         x = F.relu(self.bn1(self.conv1(x)))
         
-        # Apply residual blocks
         for res_block in self.res_blocks:
             x = res_block(x)
         
-        # Global pooling
         x = self.global_pool(x)
         x = x.squeeze(-1)  # (B, feature_dim)
         return x
@@ -234,7 +231,7 @@ class TBranchDetector(nn.Module):
                  sample_rate=16000,
                  input_length=16000,
                  num_classes=2,
-                 ast_img_size=224,
+                 ast_img_size=128, 
                  ast_patch_size=16,
                  ast_embed_dim=768,
                  ast_depth=12,
@@ -248,7 +245,7 @@ class TBranchDetector(nn.Module):
         self.wavelet_transform = WaveletTransform()
         
         self.ast_spectrogram = AST(
-            img_size=ast_img_size,
+            img_size=ast_img_size,  # Now 128 instead of 224
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
@@ -258,7 +255,7 @@ class TBranchDetector(nn.Module):
         )
         
         self.ast_wavelet = AST(
-            img_size=ast_img_size,
+            img_size=ast_img_size,  # Now 128 instead of 224
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
@@ -290,8 +287,7 @@ class TBranchDetector(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
     
-    def resize_spectrogram(self, spec, target_size=224):
-    # Properly handles tensor dimensions for model input
+    def resize_spectrogram(self, spec, target_size=128):
         while spec.dim() > 4:
             squeezed = False
             for dim in reversed(range(spec.dim())):
@@ -322,12 +318,11 @@ class TBranchDetector(nn.Module):
             x_fft = x_fft.squeeze(0) if x_fft.dim() == 5 else x_fft
             x_wav = x_wav.squeeze(0) if x_wav.dim() == 5 else x_wav
 
-        fft_resized = self.resize_spectrogram(x_fft, target_size=224)  
-        ast_specfeat = self.ast_spectrogram(fft_resized)  # (B, embed_dim)
+        x_fft = F.interpolate(x_fft, size=(128, 128), mode='bilinear', align_corners=False)
+        x_wav = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
 
-        wav_resized = self.resize_spectrogram(x_wav, target_size=224)
-        ast_wavefeat = self.ast_wavelet(wav_resized)  # (B, embed_dim)
-
+        ast_specfeat = self.ast_spectrogram(x_fft)  # (B, embed_dim)
+        ast_wavefeat = self.ast_wavelet(x_wav)  # (B, embed_dim)
         cnn_features = self.cnn_raw(x_raw)  # (B, 512)
 
         all_features = [ast_specfeat, ast_wavefeat, cnn_features]
@@ -335,7 +330,6 @@ class TBranchDetector(nn.Module):
 
         logits = self.classifier(fused_features)  # (B, num_classes)
         return logits
-
     
     def getbranch_features(self, x_raw, x_fft, x_wav):
         if isinstance(self, nn.DataParallel):
@@ -351,12 +345,8 @@ class TBranchDetector(nn.Module):
             return self.gbf(x_raw, x_fft, x_wav)
         
     def gbf(self, x_raw, x_fft, x_wav):
-        fft_resized = self.resize_spectrogram(x_fft, target_size=224)
-        ast_specfeat = self.ast_spectrogram(fft_resized)
-
-        wav_resized = self.resize_spectrogram(x_wav, target_size=224)
-        ast_wavefeat = self.ast_wavelet(wav_resized)
-
+        ast_specfeat = self.ast_spectrogram(x_fft)
+        ast_wavefeat = self.ast_wavelet(x_wav)
         cnn_features = self.cnn_raw(x_raw)
         
         return ast_specfeat, ast_wavefeat, cnn_features
@@ -367,7 +357,7 @@ def create_model(sample_rate=16000, input_length=16000, num_classes=2):
         sample_rate=sample_rate,
         input_length=input_length,
         num_classes=num_classes,
-        ast_img_size=224,
+        ast_img_size=128,
         ast_patch_size=16,
         ast_embed_dim=768,
         ast_depth=12,
