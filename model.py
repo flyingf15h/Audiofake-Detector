@@ -4,9 +4,9 @@ import torch.nn.functional as F
 import torchaudio
 import numpy as np
 import pywt
+import math
 
 class PatchEmbed(nn.Module):
-    # 2D image to patch embedding for spectrograms
     def __init__(self, img_size=224, patch_size=16, in_chans=1, embed_dim=768):
         super().__init__()
         img_size = (img_size, img_size) if isinstance(img_size, int) else img_size
@@ -19,17 +19,15 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.proj(x).flatten(2).transpose(1, 2)  # (B, N, embed_dim)
+        x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
 class TransformerBlock(nn.Module):
-    # Multi head attention and MLP
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, dropout=attn_drop, batch_first=True)
-        self.proj_drop = nn.Dropout(drop) 
+        self.proj_drop = nn.Dropout(drop)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -47,14 +45,13 @@ class TransformerBlock(nn.Module):
         x = x + self.mlp(self.norm2(x))
         return x
 
-
 class AST(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=1, embed_dim=768, depth=12, 
                  num_heads=12, mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0.):
         super().__init__()
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         num_patches = self.patch_embed.num_patches
-        
+
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -65,19 +62,34 @@ class AST(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim)
 
+    def interpolate_pos_encoding(self, x, w, h):
+        n_patches = x.shape[1] - 1
+        N = self.pos_embed.shape[1] - 1
+        if n_patches == N:
+            return self.pos_embed
+        class_pos_embed = self.pos_embed[:, 0]
+        patch_pos_embed = self.pos_embed[:, 1:]
+        dim = x.shape[-1]
+        patch_pos_embed = patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim)
+        patch_pos_embed = F.interpolate(
+            patch_pos_embed, size=(h // self.patch_embed.patch_size[0], w // self.patch_embed.patch_size[1]), mode='bicubic', align_corners=False
+        )
+        patch_pos_embed = patch_pos_embed.flatten(1, 2)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+
     def forward(self, x):
+        B, C, H, W = x.shape
         x = self.patch_embed(x)
-        cls_token = self.cls_token.expand(x.shape[0], -1, -1)
+        cls_token = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_token, x), dim=1)
-        x = x + self.pos_embed
+        x = x + self.interpolate_pos_encoding(x, W, H)
         x = self.pos_drop(x)
 
         for blk in self.blocks:
             x = blk(x)
 
         x = self.norm(x)
-        return x[:, 0]  # Return CLS token
-
+        return x[:, 0]
 
 class WaveletTransform(nn.Module):
     def __init__(self, wavelet='db4', level=5):
@@ -85,28 +97,29 @@ class WaveletTransform(nn.Module):
         self.wavelet = wavelet
         self.level = level
         self._init_filters()
-        
+
     def _init_filters(self):
         dec_lo, dec_hi, _, _ = pywt.Wavelet(self.wavelet).filter_bank
         self.register_buffer('dec_lo', torch.tensor(dec_lo).float())
         self.register_buffer('dec_hi', torch.tensor(dec_hi).float())
-        
+
     def forward(self, x):
-        # x: (B, 1, T)
         B, _, T = x.shape
         pad = len(self.dec_lo) // 2
         x = F.pad(x, (pad, pad), mode='reflect')
-        
+
         coeffs = []
         for _ in range(self.level):
-            # 1D convolution with wavelet filters
             low = F.conv1d(x, self.dec_lo.view(1, 1, -1), stride=2)
             high = F.conv1d(x, self.dec_hi.view(1, 1, -1), stride=2)
             coeffs.append(high)
             x = low
-            
-        # Stack and reshape coefficients
-        return torch.stack(coeffs, dim=1)  # (B, level, T//2^level)
+
+        stacked = torch.stack(coeffs, dim=1)
+        mean = stacked.mean()
+        std = stacked.std()
+        normalized = (stacked - mean) / (std + 1e-6)
+        return normalized
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
@@ -189,12 +202,17 @@ class SpectrogramExtractor(nn.Module):
         
         x = x.squeeze(1)  # (B, T)
         mel_spec = self.mel_spectrogram(x)
-        mel_spec = torch.log(mel_spec + 1e-8) 
+        mel_spec = torch.log(mel_spec + 1e-8)
+
+        if self.training:  
+            mel_spec = self.spec_augment(mel_spec)
+            mel_spec = self.freq_augment(mel_spec)
+            
         return mel_spec.unsqueeze(1)  
 
 
 class AttentionFusion(nn.Module):
-    def __init__(self, feature_dims, hidden_dim=256):
+    def __init__(self, feature_dims, hidden_dim=512):
         super().__init__()
         self.feature_dims = feature_dims
         self.hidden_dim = hidden_dim
@@ -232,13 +250,13 @@ class TBranchDetector(nn.Module):
                  input_length=16000,
                  num_classes=2,
                  ast_img_size=128, 
-                 ast_patch_size=16,
+                 ast_patch_size=8,
                  ast_embed_dim=768,
                  ast_depth=12,
                  ast_num_heads=12,
-                 fusion_hidden_dim=256,
-                 drop_rate=0.1,     
-                 attn_drop_rate=0.1):
+                 fusion_hidden_dim=512,
+                 drop_rate=0.2,     
+                 attn_drop_rate=0.2):
         super().__init__()
         
         self.spectrogram_extractor = SpectrogramExtractor(sample_rate=sample_rate)
@@ -359,9 +377,9 @@ def create_model(sample_rate=16000, input_length=16000, num_classes=2):
         num_classes=num_classes,
         ast_img_size=128,
         ast_patch_size=16,
-        ast_embed_dim=384,
-        ast_depth=6,
-        ast_num_heads=6,
-        fusion_hidden_dim=256
+        ast_embed_dim=256,
+        ast_depth=8,
+        ast_num_heads=8,
+        fusion_hidden_dim=512
     )
     return model

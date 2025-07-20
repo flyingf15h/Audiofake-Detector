@@ -26,7 +26,7 @@ CONFIG = {
     "sample_rate": 16000,
     "batch_size": 32,
     "num_epochs": 50,
-    "lr": 3e-5,
+    "lr": 3e-4,
     "weight_decay": 0.05,
     "drop_rate": 0.1,
     "attn_drop_rate": 0.1,
@@ -111,6 +111,7 @@ class AudioDataset(Dataset):
             )
 
     def _augment(self, audio):
+        audio = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)  
         # Time-domain augmentations# 
         if random.random() < 0.3:
             audio = np.roll(audio, random.randint(-1600, 1600))
@@ -208,7 +209,7 @@ class HybridLoss(nn.Module):
     def __init__(self, class_weights):
         super().__init__()
         self.ce_loss = nn.CrossEntropyLoss(weight=class_weights)
-        self.gamma = 2
+        self.gamma = 1.5
         self.class_weights = class_weights 
         
     def forward(self, logits, targets):
@@ -217,13 +218,14 @@ class HybridLoss(nn.Module):
         ce = F.cross_entropy(logits, targets, reduction='none')
         pt = torch.exp(-ce)
         focal_loss = ((1 - pt) ** self.gamma) * ce
+        focal_loss = focal_loss.mean()
 
         if self.class_weights is not None:
             focal_loss = focal_loss * self.class_weights[targets]
             
         focal_loss = focal_loss.mean()
         
-        return 0.7 * ce_loss + 0.3 * focal_loss
+        return 0.5 * ce_loss + 0.5 * focal_loss
 
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
@@ -249,9 +251,9 @@ def train_epoch(model, loader, criterion, optimizer, device):
         print("Wavelet resized:", x_wav.shape)
 
         # Forward pass with autocast
-        with autocast(device_type='cuda'): 
+        with autocast(device_type='cuda', dtype=torch.bfloat16): 
             logits = model(x_raw, x_fft, x_wav)
-            loss = criterion(logits, y) / CONFIG["accumulation_steps"]
+            loss = criterion(logits, y)
         
         # Backward pass with scaler
         scaler.scale(loss).backward()
@@ -259,7 +261,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         # Update weights
         if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -388,13 +390,7 @@ def main():
         lr=CONFIG["lr"],
         weight_decay=CONFIG["weight_decay"]
     )
-    scheduler = torch.optim.lr_scheduler.CyclicLR(
-        optimizer,
-        base_lr=1e-3,
-        max_lr=3e-4,
-        step_size_up=500,
-        mode='exp_range'
-    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CONFIG["num_epochs"] * len(train_loader)) 
     
     # Training
     best_auc = 0.0
