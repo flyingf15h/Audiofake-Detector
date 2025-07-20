@@ -247,8 +247,8 @@ def train_epoch(model, loader, criterion, optimizer, device):
         if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
             x_wav = x_wav.unsqueeze(1)
         
-        print("FFT resized:", x_fft.shape)
-        print("Wavelet resized:", x_wav.shape)
+        # print("FFT resized:", x_fft.shape)
+        # print("Wavelet resized:", x_wav.shape)
 
         # Forward pass with autocast
         with autocast(device_type='cuda', dtype=torch.bfloat16): 
