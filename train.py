@@ -4,13 +4,14 @@ from pathlib import Path
 from collections import defaultdict
 import torch
 import torch.nn as nn
+import torchaudio
+import torchaudio.transforms as T
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import (accuracy_score, roc_auc_score, 
-                           classification_report, roc_curve, log_loss)
-import librosa
+                           classification_report, roc_curve)
 import pywt
-import multiprocessing
+import json
 from model import TBranchDetector
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
@@ -18,6 +19,10 @@ import gc
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 import os
+import torch.backends.cudnn
+import hashlib
+from torch_lr_finder import LRFinder
+
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
@@ -31,45 +36,107 @@ CONFIG = {
     "drop_rate": 0.1,
     "attn_drop_rate": 0.1,
     "patience": 8,
-    "n_fft_train": 1024,
-    "hop_length_train": 512,
-    "n_fft_eval": 256,
-    "hop_length_eval": 128,
+    "n_fft_train": 512,
+    "hop_length_train": 256,
+    "n_fft_eval": 512,
+    "hop_length_eval": 256,
     "data_splits": {
         "in_the_wild": 0.7,
     },
     "accumulation_steps": 4
 }
 
-def prep_input_array(audio_arr, is_training=False):
-    audio_arr = librosa.util.fix_length(audio_arr, size=16000)
-    
-    # Raw audio
-    x_raw = (audio_arr - np.mean(audio_arr)) / (np.std(audio_arr) + 1e-8)
-    x_raw = torch.from_numpy(x_raw).clone().detach().float().unsqueeze(0)  # [1, 16000]
-    
-    # STFT
-    n_fft = CONFIG["n_fft_train"] if is_training else CONFIG["n_fft_eval"]
-    hop_length = CONFIG["hop_length_train"] if is_training else CONFIG["hop_length_eval"]
-    stft = librosa.stft(audio_arr, n_fft=n_fft, hop_length=hop_length)
-    mag = np.abs(stft)[:128, :128]
-    
-    # Padding/trimming
-    if mag.shape[1] < 128:
-        mag = np.pad(mag, ((0,0), (0,128-mag.shape[1])))
-    elif mag.shape[1] > 128:
-        mag = mag[:,:128]
-    
-    x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
-    x_fft = torch.from_numpy(x_fft).clone().detach().float().unsqueeze(0)  # [1, 128, 128]
-    
-    # Wavelet
-    coeffs = pywt.wavedec(audio_arr, 'db4', level=4)
-    cA4 = np.resize(coeffs[0], (64, 128))
-    x_wav = (cA4 - np.mean(cA4)) / (np.std(cA4) + 1e-8)
-    x_wav = torch.from_numpy(x_wav).clone().detach().float().unsqueeze(0)  # [1, 64, 128]
-    
+SPEC = T.Spectrogram(
+    n_fft=CONFIG["n_fft"],
+    hop_length=CONFIG["hop_length"],
+    power=2.0,
+    normalized=True,
+).to("cuda" if torch.cuda.is_available() else "cpu")
+
+def prep_input_array(audio_tensor, is_training=False):
+    if audio_tensor.size(-1) < CONFIG["sample_rate"]:
+        pad_size = CONFIG["sample_rate"] - audio_tensor.size(-1)
+        audio_tensor = F.pad(audio_tensor, (0, pad_size))
+    elif audio_tensor.size(-1) > CONFIG["sample_rate"]:
+        audio_tensor = audio_tensor[..., :CONFIG["sample_rate"]]
+
+    x_raw = (audio_tensor - audio_tensor.mean()) / (audio_tensor.std() + 1e-8)
+
+    # Spectrogram
+    x_fft = SPEC(x_raw.to(SPEC.device))  # shape [1, freq_bins, time_frames]
+    x_fft = torch.sqrt(x_fft + 1e-6)
+    x_fft = x_fft[:, :128, :128]
+    if x_fft.size(2) < 128:
+        pad_amt = 128 - x_fft.size(2)
+        x_fft = F.pad(x_fft, (0, pad_amt))
+
+    x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
+
+    # Wavelet decomposition 
+    audio_np = x_raw.squeeze().cpu().numpy()
+    coeffs = pywt.wavedec(audio_np, 'db4', level=4)
+    cA4 = coeffs[0]
+    if len(cA4) < 64*128:
+        cA4 = np.pad(cA4, (0, 64*128 - len(cA4)))
+    x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32)
+    x_wav = (x_wav - x_wav.mean()) / (x_wav.std() + 1e-8)
+    x_wav = x_wav.unsqueeze(0)
+
     return x_raw, x_fft, x_wav
+
+class CachedAudioDataset(Dataset):
+    def __init__(self, data, cache_dir, transform=None):
+        self.data = data
+        self.transform = transform
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+
+    def __getitem__(self, idx):
+        path, label = self.data[idx]
+        uid = hashlib.md5(path["array"].encode()).hexdigest()
+        cache_path = self.cache_dir / f"{uid}.pt"
+
+        if cache_path.exists():
+            return torch.load(cache_path)
+
+        # Load audio
+        waveform, sr = torchaudio.load(path["array"])
+        waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
+
+        x_raw = waveform.mean(dim=0)  # [1, T] → [T]
+        x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
+
+        x_fft = SPEC(x_raw)
+
+        # Wavelet transform
+        audio_np = x_raw.numpy()
+        coeffs = pywt.wavedec(audio_np, 'db4', level=4)
+        cA4 = coeffs[0]
+        x_wav = torch.tensor(cA4, dtype=torch.float32)
+
+        sample = {
+            "x_raw": x_raw.unsqueeze(0),
+            "x_fft": x_fft,
+            "x_wav": x_wav.unsqueeze(0),
+            "label": torch.tensor(label, dtype=torch.long),
+        }
+        torch.save(sample, cache_path)
+        return (
+            sample["x_raw"].squeeze(0),
+            sample["x_fft"].squeeze(0),
+            sample["x_wav"].squeeze(0),
+            sample["label"]
+        )
+
+    def __len__(self):
+        return len(self.data)
+
+    def _augment(self, audio):
+        if random.random() < 0.2:
+            audio = np.roll(audio, random.randint(-800, 800))
+        if random.random() < 0.2:
+            audio *= random.uniform(0.95, 1.05)
+
 
 class AudioDataset(Dataset):
     def __init__(self, file_label_pairs, augment=False, is_training=False):
@@ -84,10 +151,18 @@ class AudioDataset(Dataset):
         path, label = self.files[idx]
         try:
             if isinstance(path, (str, Path)):
-                audio, _ = librosa.load(path, sr=CONFIG["sample_rate"])
+                audio, sr = torchaudio.load(path)
+                if sr != CONFIG["sample_rate"]:
+                    resampler = T.Resample(orig_freq=sr, new_freq=CONFIG["sample_rate"])
+                    audio = resampler(audio)
             else: 
-                audio = librosa.load(path["array"], sr=CONFIG["sample_rate"])[0]
-                
+                audio, sr = torchaudio.load(path["array"])
+                if audio.shape[0] > 1:
+                    audio = audio.mean(dim=0, keepdim=True)
+                if sr != CONFIG["sample_rate"]:
+                    resampler = T.Resample(orig_freq=sr, new_freq=CONFIG["sample_rate"])
+                    audio = resampler(audio)
+                                
             if self.augment:
                 audio = self._augment(audio)
             
@@ -112,7 +187,6 @@ class AudioDataset(Dataset):
 
     def _augment(self, audio):
         audio = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)  
-        # Time-domain augmentations# 
         if random.random() < 0.3:
             audio = np.roll(audio, random.randint(-1600, 1600))
         if random.random() < 0.3:
@@ -136,7 +210,6 @@ def load_fakeorreal():
     return files
 
 def load_inthewild(split_ratio=0.7):
-    # Load in-the-wild dataset with split
     base_path = "/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild"
     realf = list(Path(f"{base_path}/real").glob("*.wav"))
     fakef = list(Path(f"{base_path}/fake").glob("*.wav"))
@@ -147,7 +220,6 @@ def load_inthewild(split_ratio=0.7):
     return [(str(f), 0) for f in train_real] + [(str(f), 1) for f in train_fake]
 
 def load_asvspoof():
-    # Load ASVspoof 2019 
     base_path = "/kaggle/input/asvspoof-2019/LA"
     protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
     flac_dir = Path(f"{base_path}/ASVspoof2019_LA_train/flac")
@@ -239,7 +311,6 @@ def train_epoch(model, loader, criterion, optimizer, device):
         x_wav = x_wav.float().to(device)
         y = y.to(device)
         
-        # Add channel dimension if missing
         if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
             x_raw = x_raw.unsqueeze(1)
         if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
@@ -255,7 +326,6 @@ def train_epoch(model, loader, criterion, optimizer, device):
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y)
         
-        # Backward pass with scaler
         scaler.scale(loss).backward()
         
         # Update weights
@@ -271,40 +341,30 @@ def train_epoch(model, loader, criterion, optimizer, device):
         # Memory cleanup
         del logits, loss, x_raw, x_fft, x_wav, y
         torch.cuda.empty_cache()
-        gc.collect()
+        if i % 10 == 0:
+            gc.collect()
     
     return total_loss / len(loader.dataset)
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, criterion, device):
     model.eval()
     y_true, y_prob = [], []
+    total_loss = 0.0
     
-    with torch.no_grad():
+    with torch.no_grad(), autocast(device_type='cuda', dtype=torch.bfloat16):
         for x_raw, x_fft, x_wav, y in loader:
-            x_raw = x_raw.float().to(device)
-            x_fft = x_fft.float().to(device)
-            x_wav = x_wav.float().to(device)
+            x_raw = x_raw.unsqueeze(1).to(device)
+            x_fft = x_fft.unsqueeze(1).to(device)
+            x_wav = x_wav.unsqueeze(1).to(device)
+            y = y.to(device)
             
-            if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
-                x_raw = x_raw.unsqueeze(1)
-            if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
-                x_fft = x_fft.unsqueeze(1)
-            if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
-                x_wav = x_wav.unsqueeze(1)
+            logits = model(x_raw, x_fft, x_wav)
+            loss = criterion(logits, y)
+            total_loss += loss.item() * y.size(0)
             
-            chunk_size = 8  
-            for i in range(0, x_raw.size(0), chunk_size):
-                chunk_raw = x_raw[i:i+chunk_size]
-                chunk_fft = x_fft[i:i+chunk_size]
-                chunk_wav = x_wav[i:i+chunk_size]
-                
-                logits = model(chunk_raw, chunk_fft, chunk_wav)
-                prob = torch.softmax(logits, dim=1)[:, 1]
-                y_true.extend(y[i:i+chunk_size].cpu().numpy())
-                y_prob.extend(prob.cpu().numpy())
-                
-                del chunk_raw, chunk_fft, chunk_wav, logits, prob
-                torch.cuda.empty_cache()
+            prob = torch.softmax(logits, dim=1)[:, 1]
+            y_true.extend(y.cpu().numpy())
+            y_prob.extend(prob.cpu().numpy())
     
     # Calculate metrics
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -313,7 +373,7 @@ def evaluate(model, loader, device):
     y_pred = (np.array(y_prob) >= threshold).astype(int)
     
     return {
-        "loss": log_loss(y_true, y_prob),
+        "loss": total_loss / len(loader.dataset),
         "accuracy": accuracy_score(y_true, y_pred),
         "auc": roc_auc_score(y_true, y_prob),
         "report": classification_report(y_true, y_pred, target_names=['Real', 'Fake']),
@@ -325,8 +385,9 @@ def evaluate(model, loader, device):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    torch.backends.cudnn.benchmark = True
+    val_losses = []
     
-    # Load all datasets
     print("Loading datasets")
     train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
     val_data = get_valset()
@@ -341,22 +402,32 @@ def main():
         class_counts[1]/total 
     ], device=device)
     
-    train_ds = AudioDataset(train_data, augment=True, is_training=True)
-    val_ds = AudioDataset(val_data, augment=False)
+    train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True, is_training=True)
+    val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False, is_training=False)
     
     train_loader = DataLoader(
         train_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=True,
-        num_workers=multiprocessing.cpu_count(),
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        collate_fn=lambda x: (torch.stack([item[0] for item in x]),
+            torch.stack([item[1] for item in x]), 
+            torch.stack([item[2] for item in x]), 
+            torch.tensor([item[3] for item in x]))
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=False,
-        num_workers=multiprocessing.cpu_count()
+        num_workers=4,
+        collate_fn=lambda x: (
+            torch.stack([item[0] for item in x]),
+            torch.stack([item[1] for item in x]),
+            torch.stack([item[2] for item in x]),
+            torch.tensor([item[3] for item in x])
+        )
     )
 
     model = TBranchDetector(
@@ -390,7 +461,24 @@ def main():
         lr=CONFIG["lr"],
         weight_decay=CONFIG["weight_decay"]
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CONFIG["num_epochs"] * len(train_loader)) 
+
+    # Get optimized lr 
+    lr_finder = LRFinder(model, optimizer, criterion, device=device)
+    lr_finder.range_test(train_loader, end_lr=1, num_iter=100)
+    lr_finder.plot() 
+    plt.savefig('lr_finder.png')
+    optimal_lr = lr_finder.suggestion()
+    print(f"Suggested LR: {optimal_lr}")
+    lr_finder.reset()
+    CONFIG["lr"] = optimal_lr
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=CONFIG["lr"],
+        steps_per_epoch=len(train_loader),
+        epochs=CONFIG["num_epochs"],
+        pct_start=0.3
+    )
     
     # Training
     best_auc = 0.0
@@ -399,6 +487,7 @@ def main():
     for epoch in range(1, CONFIG["num_epochs"] + 1):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         val_metrics = evaluate(model, val_loader, device)
+        val_losses.append(val_metrics["loss"])
         scheduler.step()
         
         print(f"\nEpoch {epoch}/{CONFIG['num_epochs']}")
@@ -413,7 +502,8 @@ def main():
             best_auc = val_metrics["auc"]
             torch.save(model.state_dict(), "best_model.pth")
             patience_counter = 0
-            print("*** New best model saved ***")
+            print("**New best model saved**")
+            torch.save(model.state_dict(), "/kaggle/working/best_model.pth")
         else:
             patience_counter += 1
             if patience_counter >= CONFIG["patience"]:
@@ -432,6 +522,15 @@ def main():
     print(f"Optimal Threshold: {final_metrics['threshold']:.4f}")
     print(final_metrics["report"])
     
+    metrics = {
+        "Best AUC": best_auc,
+        "Final Threshold": final_metrics["threshold"],
+        "Classification Report": final_metrics["report"]
+    }
+
+    with open("/kaggle/working/metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
     # Plot ROC
     plt.figure(figsize=(8, 6))
     fpr, tpr, _ = roc_curve(final_metrics["y_true"], final_metrics["y_prob"])
@@ -441,6 +540,18 @@ def main():
     plt.title('ROC Curve')
     plt.legend()
     plt.savefig('roc_curve.png')
+    plt.savefig("/kaggle/working/roc_curve.png")
+    
+    # Val loss plot
+    plt.figure(figsize=(8, 6))
+    plt.plot(range(1, len(val_losses) + 1), val_losses, marker='o')
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation Loss")
+    plt.title("Validation Loss Over Epochs")
+    plt.grid(True)
+    plt.savefig("val_loss_curve.png")
+    plt.savefig("/kaggle/working/val_loss_curve.png")
+
 
 if __name__ == "__main__":
     main()

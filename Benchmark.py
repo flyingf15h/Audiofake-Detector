@@ -77,11 +77,10 @@ class ReverseFilepathDataset(Dataset):
 
 class ReverseWaveFakeDataset(Dataset):
     def __init__(self, partitions=["partition0"], max_samples=1000):
-        # Load all samples first to properly reverse
         self.data = []
         for p in partitions:
             ds = load_dataset("Keerthana982/wavefake-audio", split=p)
-            for sample in reversed(ds):  # Process in reverse order
+            for sample in reversed(ds):  
                 self.data.append(sample)
                 if len(self.data) >= max_samples:
                     break
