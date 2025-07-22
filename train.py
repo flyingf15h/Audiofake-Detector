@@ -83,11 +83,12 @@ def prep_input_array(audio_tensor, is_training=False):
     return x_raw, x_fft, x_wav
 
 class CachedAudioDataset(Dataset):
-    def __init__(self, data, cache_dir, transform=None):
+    def __init__(self, data, cache_dir, augment=False, transform=None):
         self.data = data
         self.transform = transform
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        self.augment = augment
 
     def __getitem__(self, idx):
         path, label = self.data[idx]
@@ -97,16 +98,18 @@ class CachedAudioDataset(Dataset):
         if cache_path.exists():
             return torch.load(cache_path)
 
-        # Load audio
         waveform, sr = torchaudio.load(path["array"])
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
 
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
+
+        if self.augment:
+            x_raw = self._augment(x_raw)
+
         x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
 
         x_fft = SPEC(x_raw)
 
-        # Wavelet transform
         audio_np = x_raw.numpy()
         coeffs = pywt.wavedec(audio_np, 'db4', level=4)
         cA4 = coeffs[0]
@@ -118,6 +121,7 @@ class CachedAudioDataset(Dataset):
             "x_wav": x_wav.unsqueeze(0),
             "label": torch.tensor(label, dtype=torch.long),
         }
+
         torch.save(sample, cache_path)
         return (
             sample["x_raw"].squeeze(0),
@@ -129,11 +133,16 @@ class CachedAudioDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def _augment(self, audio):
+    def _augment(self, audio: torch.Tensor) -> torch.Tensor:
+        audio_np = audio.numpy()
+
         if random.random() < 0.2:
-            audio = np.roll(audio, random.randint(-800, 800))
+            audio_np = np.roll(audio_np, random.randint(-800, 800))
         if random.random() < 0.2:
-            audio *= random.uniform(0.95, 1.05)
+            audio_np *= random.uniform(0.95, 1.05)
+
+        return torch.tensor(audio_np, dtype=torch.float32)
+
 
 
 class AudioDataset(Dataset):
