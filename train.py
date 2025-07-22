@@ -36,9 +36,8 @@ CONFIG = {
     "drop_rate": 0.1,
     "attn_drop_rate": 0.1,
     "patience": 8,
-    "n_fft_train": 512,
+    "n_fft": 512,
     "hop_length_train": 256,
-    "n_fft_eval": 512,
     "hop_length_eval": 256,
     "data_splits": {
         "in_the_wild": 0.7,
@@ -183,7 +182,8 @@ class AudioDataset(Dataset):
                 torch.zeros(1, 128, 128), 
                 torch.zeros(1, 64, 128),  
                 0                       
-            )
+            )   
+            exit(1)
 
     def _augment(self, audio):
         audio = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)  
