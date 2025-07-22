@@ -52,6 +52,7 @@ SPEC = T.Spectrogram(
 ).to("cuda" if torch.cuda.is_available() else "cpu")
 
 def prep_input_array(audio_tensor, is_training=False):
+    device = audio_tensor.device 
     if audio_tensor.size(-1) < CONFIG["sample_rate"]:
         pad_size = CONFIG["sample_rate"] - audio_tensor.size(-1)
         audio_tensor = F.pad(audio_tensor, (0, pad_size))
@@ -70,17 +71,17 @@ def prep_input_array(audio_tensor, is_training=False):
 
     x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
 
-    # Wavelet decomposition 
-    audio_np = x_raw.squeeze().cpu().numpy()
+    # Wavelet
+    audio_np = x_raw.cpu().squeeze().numpy()
     coeffs = pywt.wavedec(audio_np, 'db4', level=4)
     cA4 = coeffs[0]
     if len(cA4) < 64*128:
         cA4 = np.pad(cA4, (0, 64*128 - len(cA4)))
-    x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32)
+    x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32).to(device)
     x_wav = (x_wav - x_wav.mean()) / (x_wav.std() + 1e-8)
     x_wav = x_wav.unsqueeze(0)
 
-    return x_raw, x_fft, x_wav
+    return x_raw, x_fft.to(device), x_wav
 
 class CachedAudioDataset(Dataset):
     def __init__(self, data, cache_dir, augment=False, transform=None):
@@ -96,11 +97,18 @@ class CachedAudioDataset(Dataset):
         cache_path = self.cache_dir / f"{uid}.pt"
 
         if cache_path.exists():
-            return torch.load(cache_path)
+            cached_data = torch.load(cache_path)
+            return (
+                cached_data["x_raw"].squeeze(0).cpu(),
+                cached_data["x_fft"].squeeze(0).cpu(),
+                cached_data["x_wav"].squeeze(0).cpu(),
+                cached_data["label"].cpu()
+            )
 
         waveform, sr = torchaudio.load(path)
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
-
+        
+        waveform = waveform.to(SPEC.device)
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
 
         if self.augment:
@@ -110,24 +118,25 @@ class CachedAudioDataset(Dataset):
 
         x_fft = SPEC(x_raw)
 
-        audio_np = x_raw.numpy()
+        audio_np = x_raw.cpu().numpy()
         coeffs = pywt.wavedec(audio_np, 'db4', level=4)
         cA4 = coeffs[0]
-        x_wav = torch.tensor(cA4, dtype=torch.float32)
+        x_wav = torch.tensor(cA4, dtype=torch.float32).to(x_raw.device)
 
         sample = {
             "x_raw": x_raw.unsqueeze(0),
             "x_fft": x_fft,
             "x_wav": x_wav.unsqueeze(0),
-            "label": torch.tensor(label, dtype=torch.long),
+            "label": torch.tensor(label, dtype=torch.long).to(x_raw.device),
         }
 
         torch.save(sample, cache_path)
+        
         return (
-            sample["x_raw"].squeeze(0),
-            sample["x_fft"].squeeze(0),
-            sample["x_wav"].squeeze(0),
-            sample["label"]
+            sample["x_raw"].squeeze(0).cpu(),
+            sample["x_fft"].squeeze(0).cpu(),
+            sample["x_wav"].squeeze(0).cpu(),
+            sample["label"].cpu()
         )
 
     def __len__(self):
@@ -312,6 +321,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
     total_loss = 0.0
     optimizer.zero_grad()
     scaler = GradScaler()
+    assert x_raw.device == device
+    assert x_fft.device == device
+    assert x_wav.device == device
+    assert y.device == device
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         x_raw = x_raw.float().to(device)
