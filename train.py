@@ -410,8 +410,8 @@ def main():
         class_counts[1]/total 
     ], device=device)
     
-    train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True, is_training=True)
-    val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False, is_training=False)
+    train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True)
+    val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False)
     
     train_loader = DataLoader(
         train_ds,
