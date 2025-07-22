@@ -92,13 +92,13 @@ class CachedAudioDataset(Dataset):
 
     def __getitem__(self, idx):
         path, label = self.data[idx]
-        uid = hashlib.md5(path["array"].encode()).hexdigest()
+        uid = hashlib.md5(path.encode()).hexdigest()
         cache_path = self.cache_dir / f"{uid}.pt"
 
         if cache_path.exists():
             return torch.load(cache_path)
 
-        waveform, sr = torchaudio.load(path["array"])
+        waveform, sr = torchaudio.load(path)
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
 
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
