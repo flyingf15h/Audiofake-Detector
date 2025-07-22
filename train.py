@@ -37,8 +37,7 @@ CONFIG = {
     "attn_drop_rate": 0.1,
     "patience": 8,
     "n_fft": 512,
-    "hop_length_train": 256,
-    "hop_length_eval": 256,
+    "hop_length": 256,
     "data_splits": {
         "in_the_wild": 0.7,
     },
