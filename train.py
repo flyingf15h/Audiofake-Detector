@@ -23,6 +23,8 @@ import torch.backends.cudnn
 import hashlib
 from torch_lr_finder import LRFinder
 import torch.multiprocessing as mp
+from torch.cuda.amp import GradScaler, autocast
+
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 mp.set_start_method('spawn', force=True)
@@ -415,9 +417,10 @@ def train_epoch(model, loader, criterion, optimizer, device):
             x_fft = x_fft.unsqueeze(1)
         if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
             x_wav = x_wav.unsqueeze(1)
-
+        
         # Forward pass with autocast
-        with autocast(device_type='cuda', dtype=torch.bfloat16): 
+        amp_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        with autocast(device_type='cuda', dtype=amp_dtype):
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y)
         
@@ -446,7 +449,8 @@ def evaluate(model, loader, criterion, device):
     y_true, y_prob = [], []
     total_loss = 0.0
     
-    with torch.no_grad(), autocast(device_type='cuda', dtype=torch.bfloat16):
+    amp_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    with torch.no_grad(), autocast(device_type='cuda', dtype=amp_dtype):
         for x_raw, x_fft, x_wav, y in loader:
             x_raw = x_raw.unsqueeze(1).to(device)
             x_fft = x_fft.unsqueeze(1).to(device)
