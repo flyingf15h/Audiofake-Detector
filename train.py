@@ -44,12 +44,29 @@ CONFIG = {
     "accumulation_steps": 4
 }
 
-SPEC = T.Spectrogram(
+class DeviceSpectrogram(nn.Module):
+    def __init__(self, n_fft, hop_length, power, normalized):
+        super().__init__()
+        self.transform = T.Spectrogram(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            power=power,
+            normalized=normalized
+        )
+        
+    def forward(self, x):
+        return self.transform(x)
+        
+    @property
+    def device(self):
+        return next(self.parameters()).device if next(self.parameters(), None) else torch.device('cpu')
+
+SPEC = DeviceSpectrogram(
     n_fft=CONFIG["n_fft"],
     hop_length=CONFIG["hop_length"],
     power=2.0,
-    normalized=True,
-).to("cuda" if torch.cuda.is_available() else "cpu")
+    normalized=True
+).to("cuda" if torch.cuda.is_available() else "cpu")    
 
 def prep_input_array(audio_tensor, is_training=False):
     device = audio_tensor.device 
@@ -99,44 +116,45 @@ class CachedAudioDataset(Dataset):
         if cache_path.exists():
             cached_data = torch.load(cache_path)
             return (
-                cached_data["x_raw"].squeeze(0).cpu(),
-                cached_data["x_fft"].squeeze(0).cpu(),
-                cached_data["x_wav"].squeeze(0).cpu(),
-                cached_data["label"].cpu()
+                cached_data["x_raw"].squeeze(0),
+                cached_data["x_fft"].squeeze(0),
+                cached_data["x_wav"].squeeze(0),
+                cached_data["label"]
             )
 
         waveform, sr = torchaudio.load(path)
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
         
-        waveform = waveform.to(SPEC.device)
+        device = next(SPEC.parameters()).device if next(SPEC.parameters(), None) else torch.device('cpu')
+        waveform = waveform.to(device)
+    
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
 
         if self.augment:
             x_raw = self._augment(x_raw)
 
         x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
-
         x_fft = SPEC(x_raw)
 
+        # Wavelet decomposition
         audio_np = x_raw.cpu().numpy()
         coeffs = pywt.wavedec(audio_np, 'db4', level=4)
         cA4 = coeffs[0]
-        x_wav = torch.tensor(cA4, dtype=torch.float32).to(x_raw.device)
+        x_wav = torch.tensor(cA4, dtype=torch.float32).to(device)
 
         sample = {
             "x_raw": x_raw.unsqueeze(0),
             "x_fft": x_fft,
             "x_wav": x_wav.unsqueeze(0),
-            "label": torch.tensor(label, dtype=torch.long).to(x_raw.device),
+            "label": torch.tensor(label, dtype=torch.long).to(device),
         }
 
         torch.save(sample, cache_path)
-        
         return (
-            sample["x_raw"].squeeze(0).cpu(),
-            sample["x_fft"].squeeze(0).cpu(),
-            sample["x_wav"].squeeze(0).cpu(),
-            sample["label"].cpu()
+            sample["x_raw"].squeeze(0),
+            sample["x_fft"].squeeze(0),
+            sample["x_wav"].squeeze(0),
+            sample["label"]
         )
 
     def __len__(self):
