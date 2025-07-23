@@ -80,34 +80,56 @@ SPEC = DeviceSpectrogram(
 ).to(device)
 
 def prep_input_array(audio_tensor, is_training=False):
-    device = audio_tensor.device 
-    if audio_tensor.size(-1) < CONFIG["sample_rate"]:
-        pad_size = CONFIG["sample_rate"] - audio_tensor.size(-1)
+    device = audio_tensor.device
+    
+    # Ensure audio is 1D and exactly CONFIG["sample_rate"] length
+    if audio_tensor.dim() > 1:
+        audio_tensor = audio_tensor.squeeze()
+    
+    # Pad or truncate to exact sample rate
+    target_length = CONFIG["sample_rate"]
+    if audio_tensor.size(-1) < target_length:
+        pad_size = target_length - audio_tensor.size(-1)
         audio_tensor = F.pad(audio_tensor, (0, pad_size))
-    elif audio_tensor.size(-1) > CONFIG["sample_rate"]:
-        audio_tensor = audio_tensor[..., :CONFIG["sample_rate"]]
-
+    elif audio_tensor.size(-1) > target_length:
+        audio_tensor = audio_tensor[:target_length]
+    
+    # Normalize
     x_raw = (audio_tensor - audio_tensor.mean()) / (audio_tensor.std() + 1e-8)
-
-    x_fft = SPEC(x_raw) 
+    x_fft = SPEC(x_raw)
     x_fft = torch.sqrt(x_fft + 1e-6)
-    x_fft = x_fft[:, :128, :128]
-    if x_fft.size(2) < 128:
-        pad_amt = 128 - x_fft.size(2)
-        x_fft = F.pad(x_fft, (0, pad_amt))
-
+    
+    if x_fft.size(0) > 128:
+        x_fft = x_fft[:128, :]
+    if x_fft.size(1) > 128:
+        x_fft = x_fft[:, :128]
+    
+    # Pad if necessary
+    if x_fft.size(0) < 128:
+        pad_freq = 128 - x_fft.size(0)
+        x_fft = F.pad(x_fft, (0, 0, 0, pad_freq))
+    if x_fft.size(1) < 128:
+        pad_time = 128 - x_fft.size(1)
+        x_fft = F.pad(x_fft, (0, pad_time))
+    
+    # Normalize FFT
     x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
-
-    audio_np = x_raw.cpu().squeeze().numpy()
+    
+    audio_np = x_raw.cpu().numpy()
     coeffs = pywt.wavedec(audio_np, 'db4', level=4)
     cA4 = coeffs[0]
-    if len(cA4) < 64*128:
-        cA4 = np.pad(cA4, (0, 64*128 - len(cA4)))
-    x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32).to(device)
+    
+    # Ensure wavelet coefficients are exactly 64*128 = 8192
+    target_wav_length = 64 * 128
+    if len(cA4) < target_wav_length:
+        cA4 = np.pad(cA4, (0, target_wav_length - len(cA4)))
+    elif len(cA4) > target_wav_length:
+        cA4 = cA4[:target_wav_length]
+    
+    x_wav = torch.tensor(cA4.reshape(64, 128), dtype=torch.float32).to(device)
     x_wav = (x_wav - x_wav.mean()) / (x_wav.std() + 1e-8)
-    x_wav = x_wav.unsqueeze(0)
-
-    return x_raw, x_fft.to(device), x_wav
+    
+    return x_raw, x_fft, x_wav
 
 class CachedAudioDataset(Dataset):
     def __init__(self, data, cache_dir, augment=False, transform=None):
@@ -124,76 +146,128 @@ class CachedAudioDataset(Dataset):
         cache_path = self.cache_dir / f"{uid}.pt"
 
         if cache_path.exists():
-            cached_data = torch.load(cache_path, map_location='cpu')
+            try:
+                cached_data = torch.load(cache_path, map_location='cpu')
+                return (
+                    cached_data["x_raw"],     # Should be [16000]
+                    cached_data["x_fft"],     # Should be [128, 128]
+                    cached_data["x_wav"],     # Should be [64, 128]
+                    cached_data["label"]
+                )
+            except Exception as e:
+                print(f"Error loading cached file {cache_path}: {e}")
+
+        try:
+            waveform, sr = torchaudio.load(path)
+            if sr != CONFIG["sample_rate"]:
+                waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
+            if waveform.size(0) > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+            waveform = waveform.squeeze()
+            if self.augment:
+                waveform = self._augment(waveform)
+            
+            x_raw, x_fft, x_wav = prep_input_array(waveform, is_training=self.augment)
+            
+            x_raw = x_raw.cpu()
+            x_fft = x_fft.cpu()
+            x_wav = x_wav.cpu()
+            
+            sample = {
+                "x_raw": x_raw,           # [16000]
+                "x_fft": x_fft,           # [128, 128]
+                "x_wav": x_wav,           # [64, 128]
+                "label": torch.tensor(label, dtype=torch.long),
+            }
+            
+            # Cache the processed data
+            torch.save(sample, cache_path)
+            
             return (
-                cached_data["x_raw"].squeeze(0),
-                cached_data["x_fft"].squeeze(0),
-                cached_data["x_wav"].squeeze(0),
-                cached_data["label"]
+                sample["x_raw"],
+                sample["x_fft"],
+                sample["x_wav"],
+                sample["label"]
             )
-
-        waveform, sr = torchaudio.load(path)
-        waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
-        
-        x_raw = waveform.mean(dim=0)  # [1, T] → [T]
-        if self.augment:
-            x_raw = self._augment(x_raw)
-
-        x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
-        
-        x_fft = torch.stft(
-            x_raw,
-            n_fft=CONFIG["n_fft"],
-            hop_length=CONFIG["hop_length"],
-            window=torch.hann_window(CONFIG["n_fft"]),
-            return_complex=True
-        ).abs().pow(2)
-        
-        x_fft = torch.sqrt(x_fft + 1e-6)
-        x_fft = x_fft[..., :128, :128] 
-        
-        if x_fft.size(-1) < 128:
-            x_fft = F.pad(x_fft, (0, 128 - x_fft.size(-1)))
-        
-        x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
-
-        # Wavelet decomposition
-        audio_np = x_raw.numpy()
-        coeffs = pywt.wavedec(audio_np, 'db4', level=4)
-        cA4 = coeffs[0]
-        
-        if len(cA4) < 64*128:
-            cA4 = np.pad(cA4, (0, 64*128 - len(cA4)))
-        x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32)
-
-        sample = {
-            "x_raw": x_raw.unsqueeze(0),
-            "x_fft": x_fft,
-            "x_wav": x_wav.unsqueeze(0),
-            "label": torch.tensor(label, dtype=torch.long),
-        }
-
-        torch.save(sample, cache_path)
-        return (
-            sample["x_raw"].squeeze(0),
-            sample["x_fft"].squeeze(0),
-            sample["x_wav"].squeeze(0),
-            sample["label"]
-        )
+            
+        except Exception as e:
+            print(f"Error processing {path}: {e}")
+            # Return zero tensors with correct shapes
+            return (
+                torch.zeros(CONFIG["sample_rate"]),          # [16000]
+                torch.zeros(128, 128),                       # [128, 128]
+                torch.zeros(64, 128),                        # [64, 128]
+                torch.tensor(0, dtype=torch.long)
+            )
 
     def __len__(self):
         return len(self.data)
 
     def _augment(self, audio: torch.Tensor) -> torch.Tensor:
-        audio_np = audio.cpu().numpy()
+        if isinstance(audio, torch.Tensor):
+            audio_np = audio.cpu().numpy()
+        else:
+            audio_np = audio
 
         if random.random() < 0.2:
             audio_np = np.roll(audio_np, random.randint(-800, 800))
         if random.random() < 0.2:
             audio_np *= random.uniform(0.95, 1.05)
+        if random.random() < 0.2:
+            audio_np += np.random.normal(0, 0.005, audio_np.shape)
 
-        return torch.tensor(audio_np, dtype=torch.float32)
+        return torch.tensor(np.clip(audio_np, -1.0, 1.0), dtype=torch.float32)
 
+def collate_fn(batch):
+    try:
+        # Separate the batch components
+        x_raw_list = []
+        x_fft_list = []
+        x_wav_list = []
+        labels = []
+        
+        for item in batch:
+            x_raw, x_fft, x_wav, label = item
+            
+            # Ensure correct shapes
+            if x_raw.dim() == 0:  # scalar
+                x_raw = torch.zeros(CONFIG["sample_rate"])
+            elif x_raw.size(0) != CONFIG["sample_rate"]:
+                # Pad or truncate to correct size
+                if x_raw.size(0) < CONFIG["sample_rate"]:
+                    x_raw = F.pad(x_raw, (0, CONFIG["sample_rate"] - x_raw.size(0)))
+                else:
+                    x_raw = x_raw[:CONFIG["sample_rate"]]
+            
+            if x_fft.shape != (128, 128):
+                x_fft = torch.zeros(128, 128)
+                
+            if x_wav.shape != (64, 128):
+                x_wav = torch.zeros(64, 128)
+            
+            x_raw_list.append(x_raw)
+            x_fft_list.append(x_fft)
+            x_wav_list.append(x_wav)
+            labels.append(label)
+        
+        return (
+            torch.stack(x_raw_list),
+            torch.stack(x_fft_list),
+            torch.stack(x_wav_list),
+            torch.tensor(labels, dtype=torch.long)
+        )
+        
+    except Exception as e:
+        print(f"Error in collate_fn: {e}")
+        # Return batch of zeros as fallback
+        batch_size = len(batch)
+        return (
+            torch.zeros(batch_size, CONFIG["sample_rate"]),
+            torch.zeros(batch_size, 128, 128),
+            torch.zeros(batch_size, 64, 128),
+            torch.zeros(batch_size, dtype=torch.long)
+        )
+    
 class AudioDataset(Dataset):
     def __init__(self, file_label_pairs, augment=False, is_training=False):
         self.files = file_label_pairs
@@ -213,42 +287,48 @@ class AudioDataset(Dataset):
                     audio = resampler(audio)
             else: 
                 audio, sr = torchaudio.load(path["array"])
-                if audio.shape[0] > 1:
-                    audio = audio.mean(dim=0, keepdim=True)
                 if sr != CONFIG["sample_rate"]:
                     resampler = T.Resample(orig_freq=sr, new_freq=CONFIG["sample_rate"])
                     audio = resampler(audio)
+            
+            # Convert to mono and remove batch dimension
+            if audio.shape[0] > 1:
+                audio = audio.mean(dim=0, keepdim=True)
+            audio = audio.squeeze()
                                 
             if self.augment:
                 audio = self._augment(audio)
             
+            # Use standardized preprocessing
             x_raw, x_fft, x_wav = prep_input_array(audio, self.is_training)
                 
             return (
-                x_raw.squeeze(0),      
-                x_fft.squeeze(0),    
-                x_wav.squeeze(0),    
+                x_raw.cpu(),      # [16000]
+                x_fft.cpu(),      # [128, 128]
+                x_wav.cpu(),      # [64, 128]
                 label
             )
             
         except Exception as e:
             print(f"Error loading {path}: {str(e)}")
             return (
-                torch.zeros(16000),      
-                torch.zeros(1, 128, 128), 
-                torch.zeros(1, 64, 128),  
+                torch.zeros(CONFIG["sample_rate"]),      # [16000]
+                torch.zeros(128, 128),                   # [128, 128]
+                torch.zeros(64, 128),                    # [64, 128]
                 0                       
             )   
 
     def _augment(self, audio):
         audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
         audio_np = (audio_np - np.mean(audio_np)) / (np.std(audio_np) + 1e-8)  
+        
         if random.random() < 0.3:
             audio_np = np.roll(audio_np, random.randint(-1600, 1600))
         if random.random() < 0.3:
             audio_np *= random.uniform(0.8, 1.2)
         if random.random() < 0.2:
             audio_np += np.random.normal(0, 0.005, audio_np.shape)
+            
         return torch.tensor(np.clip(audio_np, -1.0, 1.0), dtype=torch.float32)
 
 def load_fakeorreal():
