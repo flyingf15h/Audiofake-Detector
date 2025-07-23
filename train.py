@@ -22,9 +22,10 @@ import os
 import torch.backends.cudnn
 import hashlib
 from torch_lr_finder import LRFinder
-
+import torch.multiprocessing as mp
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+mp.set_start_method('spawn', force=True)
 
 # Configuration
 CONFIG = {
@@ -123,7 +124,7 @@ class CachedAudioDataset(Dataset):
         cache_path = self.cache_dir / f"{uid}.pt"
 
         if cache_path.exists():
-            cached_data = torch.load(cache_path, map_location='cpu')  # Load to CPU first
+            cached_data = torch.load(cache_path, map_location='cpu')
             return (
                 cached_data["x_raw"].squeeze(0),
                 cached_data["x_fft"].squeeze(0),
@@ -135,16 +136,29 @@ class CachedAudioDataset(Dataset):
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
         
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
-
         if self.augment:
             x_raw = self._augment(x_raw)
 
         x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
         
-        x_raw_device = x_raw.to(self.device)
-        x_fft = SPEC(x_raw_device)
+        x_fft = torch.stft(
+            x_raw,
+            n_fft=CONFIG["n_fft"],
+            hop_length=CONFIG["hop_length"],
+            window=torch.hann_window(CONFIG["n_fft"]),
+            return_complex=True
+        ).abs().pow(2)
+        
+        x_fft = torch.sqrt(x_fft + 1e-6)
+        x_fft = x_fft[..., :128, :128] 
+        
+        if x_fft.size(-1) < 128:
+            x_fft = F.pad(x_fft, (0, 128 - x_fft.size(-1)))
+        
+        x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
 
-        audio_np = x_raw.cpu().numpy()
+        # Wavelet decomposition
+        audio_np = x_raw.numpy()
         coeffs = pywt.wavedec(audio_np, 'db4', level=4)
         cA4 = coeffs[0]
         
@@ -154,7 +168,7 @@ class CachedAudioDataset(Dataset):
 
         sample = {
             "x_raw": x_raw.unsqueeze(0),
-            "x_fft": x_fft.cpu(), 
+            "x_fft": x_fft,
             "x_wav": x_wav.unsqueeze(0),
             "label": torch.tensor(label, dtype=torch.long),
         }
@@ -449,6 +463,7 @@ def main():
         shuffle=True,
         num_workers=4,
         pin_memory=True,
+        multiprocessing_context='spawn',
         persistent_workers=True,
         collate_fn=lambda x: (torch.stack([item[0] for item in x]),
             torch.stack([item[1] for item in x]), 
@@ -460,6 +475,7 @@ def main():
         batch_size=CONFIG["batch_size"],
         shuffle=False,
         num_workers=4,
+        multiprocessing_context='spawn',
         collate_fn=lambda x: (
             torch.stack([item[0] for item in x]),
             torch.stack([item[1] for item in x]),
