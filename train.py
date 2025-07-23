@@ -47,26 +47,36 @@ CONFIG = {
 class DeviceSpectrogram(nn.Module):
     def __init__(self, n_fft, hop_length, power, normalized):
         super().__init__()
-        self.transform = T.Spectrogram(
-            n_fft=n_fft,
-            hop_length=hop_length,
-            power=power,
-            normalized=normalized
-        )
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.power = power
+        self.normalized = normalized
+        self.register_buffer('window', torch.hann_window(n_fft))
         
     def forward(self, x):
-        return self.transform(x)
+        x = x.to(self.window.device)
+        return torch.stft(
+            x,
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            window=self.window,
+            power=self.power,
+            normalized=self.normalized,
+            return_complex=True
+        ).abs().pow(2)  
         
-    @property
-    def device(self):
-        return next(self.parameters()).device if next(self.parameters(), None) else torch.device('cpu')
+    def to(self, device):
+        super().to(device)
+        self.window = self.window.to(device)
+        return self
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SPEC = DeviceSpectrogram(
     n_fft=CONFIG["n_fft"],
     hop_length=CONFIG["hop_length"],
     power=2.0,
     normalized=True
-).to("cuda" if torch.cuda.is_available() else "cpu")    
+).to(device)
 
 def prep_input_array(audio_tensor, is_training=False):
     device = audio_tensor.device 
@@ -78,8 +88,7 @@ def prep_input_array(audio_tensor, is_training=False):
 
     x_raw = (audio_tensor - audio_tensor.mean()) / (audio_tensor.std() + 1e-8)
 
-    # Spectrogram
-    x_fft = SPEC(x_raw.to(SPEC.device))  # shape [1, freq_bins, time_frames]
+    x_fft = SPEC(x_raw) 
     x_fft = torch.sqrt(x_fft + 1e-6)
     x_fft = x_fft[:, :128, :128]
     if x_fft.size(2) < 128:
@@ -88,7 +97,6 @@ def prep_input_array(audio_tensor, is_training=False):
 
     x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
 
-    # Wavelet
     audio_np = x_raw.cpu().squeeze().numpy()
     coeffs = pywt.wavedec(audio_np, 'db4', level=4)
     cA4 = coeffs[0]
@@ -107,6 +115,7 @@ class CachedAudioDataset(Dataset):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         self.augment = augment
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def __getitem__(self, idx):
         path, label = self.data[idx]
@@ -114,7 +123,7 @@ class CachedAudioDataset(Dataset):
         cache_path = self.cache_dir / f"{uid}.pt"
 
         if cache_path.exists():
-            cached_data = torch.load(cache_path)
+            cached_data = torch.load(cache_path, map_location='cpu')  # Load to CPU first
             return (
                 cached_data["x_raw"].squeeze(0),
                 cached_data["x_fft"].squeeze(0),
@@ -125,28 +134,29 @@ class CachedAudioDataset(Dataset):
         waveform, sr = torchaudio.load(path)
         waveform = torchaudio.functional.resample(waveform, sr, CONFIG["sample_rate"])
         
-        device = next(SPEC.parameters()).device if next(SPEC.parameters(), None) else torch.device('cpu')
-        waveform = waveform.to(device)
-    
         x_raw = waveform.mean(dim=0)  # [1, T] → [T]
 
         if self.augment:
             x_raw = self._augment(x_raw)
 
         x_raw = (x_raw - x_raw.mean()) / (x_raw.std() + 1e-8)
-        x_fft = SPEC(x_raw)
+        
+        x_raw_device = x_raw.to(self.device)
+        x_fft = SPEC(x_raw_device)
 
-        # Wavelet decomposition
         audio_np = x_raw.cpu().numpy()
         coeffs = pywt.wavedec(audio_np, 'db4', level=4)
         cA4 = coeffs[0]
-        x_wav = torch.tensor(cA4, dtype=torch.float32).to(device)
+        
+        if len(cA4) < 64*128:
+            cA4 = np.pad(cA4, (0, 64*128 - len(cA4)))
+        x_wav = torch.tensor(cA4[:64*128].reshape(64, 128), dtype=torch.float32)
 
         sample = {
             "x_raw": x_raw.unsqueeze(0),
-            "x_fft": x_fft,
+            "x_fft": x_fft.cpu(), 
             "x_wav": x_wav.unsqueeze(0),
-            "label": torch.tensor(label, dtype=torch.long).to(device),
+            "label": torch.tensor(label, dtype=torch.long),
         }
 
         torch.save(sample, cache_path)
@@ -161,7 +171,7 @@ class CachedAudioDataset(Dataset):
         return len(self.data)
 
     def _augment(self, audio: torch.Tensor) -> torch.Tensor:
-        audio_np = audio.numpy()
+        audio_np = audio.cpu().numpy()
 
         if random.random() < 0.2:
             audio_np = np.roll(audio_np, random.randint(-800, 800))
@@ -169,8 +179,6 @@ class CachedAudioDataset(Dataset):
             audio_np *= random.uniform(0.95, 1.05)
 
         return torch.tensor(audio_np, dtype=torch.float32)
-
-
 
 class AudioDataset(Dataset):
     def __init__(self, file_label_pairs, augment=False, is_training=False):
@@ -201,7 +209,6 @@ class AudioDataset(Dataset):
                 audio = self._augment(audio)
             
             x_raw, x_fft, x_wav = prep_input_array(audio, self.is_training)
-            x_raw = x_raw.squeeze() 
                 
             return (
                 x_raw.squeeze(0),      
@@ -218,17 +225,17 @@ class AudioDataset(Dataset):
                 torch.zeros(1, 64, 128),  
                 0                       
             )   
-            exit(1)
 
     def _augment(self, audio):
-        audio = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)  
+        audio_np = audio.numpy() if isinstance(audio, torch.Tensor) else audio
+        audio_np = (audio_np - np.mean(audio_np)) / (np.std(audio_np) + 1e-8)  
         if random.random() < 0.3:
-            audio = np.roll(audio, random.randint(-1600, 1600))
+            audio_np = np.roll(audio_np, random.randint(-1600, 1600))
         if random.random() < 0.3:
-            audio *= random.uniform(0.8, 1.2)
+            audio_np *= random.uniform(0.8, 1.2)
         if random.random() < 0.2:
-            audio += np.random.normal(0, 0.005, audio.shape)
-        return np.clip(audio, -1.0, 1.0)
+            audio_np += np.random.normal(0, 0.005, audio_np.shape)
+        return torch.tensor(np.clip(audio_np, -1.0, 1.0), dtype=torch.float32)
 
 def load_fakeorreal():
     base_path = Path("/kaggle/input/the-fake-or-real-dataset")
@@ -258,11 +265,9 @@ def load_asvspoof():
     base_path = "/kaggle/input/asvspoof-2019/LA"
     protocol_path = f"{base_path}/ASVspoof2019_LA_cm_protocols/ASVspoof2019.LA.cm.train.trn.txt"
     flac_dir = Path(f"{base_path}/ASVspoof2019_LA_train/flac")
-    
 
     print(f"Checking protocol at: {protocol_path}")
     print(f"Checking FLAC files at: {flac_dir}")
-
 
     # Read protocol file
     file_labels = {}
@@ -339,10 +344,6 @@ def train_epoch(model, loader, criterion, optimizer, device):
     total_loss = 0.0
     optimizer.zero_grad()
     scaler = GradScaler()
-    assert x_raw.device == device
-    assert x_fft.device == device
-    assert x_wav.device == device
-    assert y.device == device
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         x_raw = x_raw.float().to(device)
@@ -350,15 +351,13 @@ def train_epoch(model, loader, criterion, optimizer, device):
         x_wav = x_wav.float().to(device)
         y = y.to(device)
         
+        # Ensure correct dimensions
         if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
             x_raw = x_raw.unsqueeze(1)
         if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
             x_fft = x_fft.unsqueeze(1)
         if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
             x_wav = x_wav.unsqueeze(1)
-        
-        # print("FFT resized:", x_fft.shape)
-        # print("Wavelet resized:", x_wav.shape)
 
         # Forward pass with autocast
         with autocast(device_type='cuda', dtype=torch.bfloat16): 
@@ -525,7 +524,7 @@ def main():
     
     for epoch in range(1, CONFIG["num_epochs"] + 1):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_metrics = evaluate(model, val_loader, device)
+        val_metrics = evaluate(model, val_loader, criterion, device)
         val_losses.append(val_metrics["loss"])
         scheduler.step()
         
@@ -554,7 +553,7 @@ def main():
     
     # Final evaluation
     model.load_state_dict(torch.load("best_model.pth"))
-    final_metrics = evaluate(model, val_loader, device)
+    final_metrics = evaluate(model, val_loader, criterion, device)
     
     print("\nFinal Evaluation")
     print(f"Best AUC: {best_auc:.4f}")
