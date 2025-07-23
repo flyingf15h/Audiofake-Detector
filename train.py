@@ -61,10 +61,10 @@ class DeviceSpectrogram(nn.Module):
             n_fft=self.n_fft,
             hop_length=self.hop_length,
             window=self.window,
-            power=self.power,
             normalized=self.normalized,
             return_complex=True
         ).abs().pow(2)  
+
         
     def to(self, device):
         super().to(device)
