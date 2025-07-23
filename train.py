@@ -434,6 +434,18 @@ def evaluate(model, loader, criterion, device):
         "y_prob": y_prob
     }
 
+def collate_fn(batch):
+    try:
+        return (
+            torch.stack([item[0] for item in batch]),
+            torch.stack([item[1] for item in batch]),
+            torch.stack([item[2] for item in batch]),
+            torch.tensor([item[3] for item in batch])
+        )
+    except Exception as e:
+        print(f"Error in collate_fn: {e}")
+        raise
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -465,10 +477,7 @@ def main():
         pin_memory=True,
         multiprocessing_context='spawn',
         persistent_workers=True,
-        collate_fn=lambda x: (torch.stack([item[0] for item in x]),
-            torch.stack([item[1] for item in x]), 
-            torch.stack([item[2] for item in x]), 
-            torch.tensor([item[3] for item in x]))
+        collate_fn=collate_fn
     )
     val_loader = DataLoader(
         val_ds,
@@ -476,12 +485,7 @@ def main():
         shuffle=False,
         num_workers=4,
         multiprocessing_context='spawn',
-        collate_fn=lambda x: (
-            torch.stack([item[0] for item in x]),
-            torch.stack([item[1] for item in x]),
-            torch.stack([item[2] for item in x]),
-            torch.tensor([item[3] for item in x])
-        )
+        collate_fn=collate_fn
     )
 
     model = TBranchDetector(
