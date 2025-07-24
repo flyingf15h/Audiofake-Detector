@@ -155,6 +155,7 @@ class CachedAudioDataset(Dataset):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def __getitem__(self, idx):
+        print(f"Dataset.__getitem__ called for index {idx}") 
         path, label = self.data[idx]
         uid = hashlib.md5(path.encode()).hexdigest()
         cache_path = self.cache_dir / f"{uid}.pt"
@@ -406,12 +407,16 @@ class HybridLoss(nn.Module):
         return 0.5 * ce_loss + 0.5 * focal_loss
 
 def train_epoch(model, loader, criterion, optimizer, device):
+    print("Entered train epoch")
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
     scaler = GradScaler('cuda')
     
+    print(f"Start iterating over {len(loader)} batches")
+
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
+        print(f"BATCH {i} START ")  
         try:
             x_raw = x_raw.float().to(device, non_blocking=True)
             x_fft = x_fft.float().to(device, non_blocking=True)  
@@ -433,9 +438,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
             elif x_wav.dim() == 5:  # [B, 1, 1, 64, 128] 
                 x_wav = x_wav.squeeze(2)  # [B, 1, 64, 128]
             
-            # Synchronize before forward pass
             torch.cuda.synchronize()
-            
             # Forward pass with autocast
             with autocast('cuda'):
                 logits = model(x_raw, x_fft, x_wav)
@@ -458,6 +461,11 @@ def train_epoch(model, loader, criterion, optimizer, device):
             if i % 10 == 0:
                 torch.cuda.empty_cache()
                 gc.collect()
+
+            print(f"Batch {i} moved to device successfully")  
+            if i >= 2:
+                print("Stopping after 3 batches for debugging")
+                break
                 
         except Exception as e:
             print(f"Error in batch {i}: {e}")
@@ -685,7 +693,39 @@ def main():
         epochs=CONFIG["num_epochs"],
         pct_start=0.3
     )
-    
+
+    print("Starting training loop")
+    print(f"Training loader length: {len(train_loader)}")
+
+    try:
+        print("Attempting to get first batch...")
+        first_batch = next(iter(train_loader))
+        print(f"Successfully got first batch with shapes: {[x.shape for x in first_batch[:3]]}")
+        print("First batch data types:", [type(x) for x in first_batch])
+        print("First batch devices:", [x.device if hasattr(x, 'device') else 'no device' for x in first_batch])
+    except Exception as e:
+        print(f"ERROR getting first batch: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("Testing model forward pass...")
+    try:
+        with torch.no_grad():
+            # Move test batch to device and test model
+            test_raw = first_batch[0][:2].float().to(device)  # Take only 2 samples
+            test_fft = first_batch[1][:2].float().to(device)
+            test_wav = first_batch[2][:2].float().to(device)
+            
+            print(f"Test batch shapes on device: raw={test_raw.shape}, fft={test_fft.shape}, wav={test_wav.shape}")
+            
+            # Test the model forward pass
+            test_output = model(test_raw, test_fft, test_wav)
+            print(f"Model forward pass successful: {test_output.shape}")    
+    except Exception as e:
+        print(f"ERROR in model forward pass: {e}")
+        import traceback
+        traceback.print_exc()
+    print("Entering training loop")
     # Training
     best_auc = 0.0
     patience_counter = 0
