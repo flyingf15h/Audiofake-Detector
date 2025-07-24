@@ -533,13 +533,7 @@ def main():
     torch.backends.cudnn.benchmark = True
     val_losses = []
     
-    print(f"Loaded {len(train_ds)} training samples, {len(val_ds)} validation samples")
-    sample = train_ds[0]
-    print("Sample shapes:")
-    print(f"Raw: {sample[0].shape} (should be [16000])")
-    print(f"FFT: {sample[1].shape} (should be [128, 128])") 
-    print(f"Wavelet: {sample[2].shape} (should be [64, 128])")
-
+    
     print("Loading datasets")
     train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
     val_data = get_valset()
@@ -557,6 +551,13 @@ def main():
     train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True)
     val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False)
      
+    print(f"Loaded {len(train_ds)} training samples, {len(val_ds)} validation samples")
+    sample = train_ds[0]
+    print("Sample shapes:")
+    print(f"Raw: {sample[0].shape} (should be [16000])")
+    print(f"FFT: {sample[1].shape} (should be [128, 128])") 
+    print(f"Wavelet: {sample[2].shape} (should be [64, 128])")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=CONFIG["batch_size"],
