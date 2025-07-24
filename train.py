@@ -416,6 +416,16 @@ class HybridLoss(nn.Module):
         
         return 0.5 * ce_loss + 0.5 * focal_loss
 
+# Wrapper class for LRFinder compatibility
+class ModelWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+    
+    def forward(self, batch):
+        x_raw, x_fft, x_wav, _ = batch
+        return self.model(x_raw, x_fft, x_wav)
+
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
@@ -428,7 +438,6 @@ def train_epoch(model, loader, criterion, optimizer, device):
         x_wav = x_wav.float().to(device)
         y = y.to(device)
         
-        # Ensure correct dimensions
         if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
             x_raw = x_raw.unsqueeze(1)
         if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
@@ -634,23 +643,34 @@ def main():
                 
             raise
         
-        # Optimization
-        criterion = HybridLoss(class_weights)
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=CONFIG["lr"],
-            weight_decay=CONFIG["weight_decay"]
-        )
+    # Optimization
+    criterion = HybridLoss(class_weights)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=CONFIG["lr"],
+        weight_decay=CONFIG["weight_decay"]
+    )
 
-    # Get optimized lr 
-    lr_finder = LRFinder(model, optimizer, criterion, device=device)
+    wrapped_model = ModelWrapper(model)
+    lr_finder = LRFinder(wrapped_model, optimizer, criterion, device=device)
     lr_finder.range_test(train_loader, end_lr=1, num_iter=100)
     lr_finder.plot() 
     plt.savefig('lr_finder.png')
     optimal_lr = lr_finder.suggestion()
     print(f"Suggested LR: {optimal_lr}")
     lr_finder.reset()
-    CONFIG["lr"] = optimal_lr
+    
+    # Update learning rate
+    if optimal_lr is not None:
+        CONFIG["lr"] = optimal_lr
+    else:
+        print("LR finder didn't find a good learning rate, using default")
+
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=CONFIG["lr"],
+        weight_decay=CONFIG["weight_decay"]
+    )
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
