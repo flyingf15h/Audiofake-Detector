@@ -102,12 +102,30 @@ def prep_input_array(audio_tensor, is_training=False):
     # FFT processing - ensure consistent size
     x_fft = SPEC(x_raw)
     x_fft = torch.sqrt(x_fft + 1e-6)
+
+    n_fft = CONFIG["n_fft"]
+    hop_length = CONFIG["hop_length"]
+    expected_freq_bins = n_fft // 2 + 1
+    expected_time_frames = int(np.ceil(CONFIG["sample_rate"] / hop_length))
     
     # Ensure FFT is exactly [257, 63] (n_fft//2+1, frames)
     if x_fft.size(0) > 128:
         x_fft = x_fft[:128, :]
     if x_fft.size(1) > 128:
         x_fft = x_fft[:, :128]
+    
+    # Ensure we have correct dimensions
+    if x_fft.size(0) != expected_freq_bins or x_fft.size(1) != expected_time_frames:
+        # Handle cases where FFT is wrong size (shouldn't happen with current settings)
+        x_fft = x_fft[:expected_freq_bins, :expected_time_frames]
+        if x_fft.size(0) < expected_freq_bins or x_fft.size(1) < expected_time_frames:
+            x_fft = F.pad(x_fft, (0, max(0, expected_time_frames - x_fft.size(1)),
+                                0, max(0, expected_freq_bins - x_fft.size(0))))
+    
+    # Now resize to fixed 128x128
+    x_fft = F.interpolate(x_fft.unsqueeze(0).unsqueeze(0), 
+                         size=(128, 128), 
+                         mode='bilinear').squeeze()
     
     # Pad if necessary
     if x_fft.size(0) < 128:
@@ -483,14 +501,30 @@ def evaluate(model, loader, criterion, device):
 
 def collate_fn(batch):
     try:
-        return (
-            torch.stack([item[0] for item in batch]),
-            torch.stack([item[1] for item in batch]),
-            torch.stack([item[2] for item in batch]),
-            torch.tensor([item[3] for item in batch])
-        )
+        raw_audio = torch.stack([item[0] for item in batch])
+        assert raw_audio.dim() == 2 and raw_audio.shape[1] == 16000, \
+            f"Raw audio should be [B, 16000], got {raw_audio.shape}"
+        raw_audio = raw_audio.unsqueeze(1)
+        
+        fft = torch.stack([item[1] for item in batch])
+        assert fft.dim() == 3 and fft.shape[1:] == (128, 128), \
+            f"FFT should be [B, 128, 128], got {fft.shape}"
+        fft = fft.unsqueeze(1)
+        
+        wavelet = torch.stack([item[2] for item in batch])
+        assert wavelet.dim() == 3 and wavelet.shape[1:] == (64, 128), \
+            f"Wavelet should be [B, 64, 128], got {wavelet.shape}"
+        wavelet = wavelet.unsqueeze(1)
+        
+        labels = torch.tensor([item[3] for item in batch])
+        
+        return raw_audio, fft, wavelet, labels
+        
     except Exception as e:
         print(f"Error in collate_fn: {e}")
+        print("Sample shapes in batch:")
+        for i, item in enumerate(batch):
+            print(f"Sample {i}: raw={item[0].shape}, fft={item[1].shape}, wavelet={item[2].shape}")
         raise
 
 def main():
@@ -499,6 +533,13 @@ def main():
     torch.backends.cudnn.benchmark = True
     val_losses = []
     
+    print(f"Loaded {len(train_ds)} training samples, {len(val_ds)} validation samples")
+    sample = train_ds[0]
+    print("Sample shapes:")
+    print(f"Raw: {sample[0].shape} (should be [16000])")
+    print(f"FFT: {sample[1].shape} (should be [128, 128])") 
+    print(f"Wavelet: {sample[2].shape} (should be [64, 128])")
+
     print("Loading datasets")
     train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
     val_data = get_valset()
@@ -546,18 +587,27 @@ def main():
         
     print("\nVerifying batch shapes:")
     test_batch = next(iter(train_loader))
-    print(f"Raw audio: {test_batch[0].shape}")
-    print(f"FFT: {test_batch[1].shape}")
-    print(f"Wavelet: {test_batch[2].shape}")
-    
+    print(f"Raw audio: {test_batch[0].shape} (should be [32, 1, 16000])")
+    print(f"FFT: {test_batch[1].shape} (should be [32, 1, 128, 128])")
+    print(f"Wavelet: {test_batch[2].shape} (should be [32, 1, 64, 128])")
+
+    # Verify model input compatibility
     with torch.no_grad():
-        test_inputs = (
-            test_batch[0].unsqueeze(1).to(device),  # [B,1,16000]
-            test_batch[1].unsqueeze(1).to(device),  # [B,1,128,128]
-            test_batch[2].unsqueeze(1).to(device)   # [B,1,64,128]
-        )
-        test_output = model(*test_inputs)
-        print(f"Model test output shape: {test_output.shape}")
+        try:
+            test_output = model(
+                test_batch[0].to(device),
+                test_batch[1].to(device),
+                test_batch[2].to(device)
+            )
+            print(f"Model test output shape: {test_output.shape}")
+        except Exception as e:
+            print(f"Model test failed: {str(e)}")
+            # Add debug info
+            print("Model input requirements:")
+            print("Raw branch expects:", model.raw_branch_expected_shape())
+            print("FFT branch expects:", model.fft_branch_expected_shape())
+            print("Wavelet branch expects:", model.wavelet_branch_expected_shape())
+            raise
 
     # Optimization
     criterion = HybridLoss(class_weights)
@@ -659,4 +709,6 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     main()

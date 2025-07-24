@@ -154,7 +154,7 @@ class RawCNN(nn.Module):
         super().__init__()
         
         # First conv layer to capture temporal patterns
-        self.conv1 = nn.Conv1d(1, 64, kernel_size=80, stride=4, padding=38)
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=51, stride=4, padding=38)
         self.bn1 = nn.BatchNorm1d(64)
         
         # Residual blocks
@@ -296,6 +296,15 @@ class TBranchDetector(nn.Module):
         
         self.apply(self._init_weights)
         
+    def raw_branch_expected_shape(self):
+        return f"[B, 1, {self.raw_input_length}]"
+
+    def fft_branch_expected_shape(self):
+        return "[B, 1, 128, 128]" 
+
+    def wavelet_branch_expected_shape(self):
+        return "[B, 1, 64, 128]" 
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
@@ -327,6 +336,13 @@ class TBranchDetector(nn.Module):
         return spec
     
     def forward(self, x_raw, x_fft, x_wav):
+        if x_raw.dim() == 2: 
+            x_raw = x_raw.unsqueeze(1)
+        if x_fft.dim() == 3:
+            x_fft = x_fft.unsqueeze(1)
+        if x_wav.dim() == 3: 
+            x_wav = x_wav.unsqueeze(1)
+        
         assert x_raw.dim() == 3, f"Expected raw audio shape [B,1,L], got {x_raw.shape}"
         assert x_fft.dim() == 4, f"Expected FFT shape [B,1,H,W], got {x_fft.shape}"
         assert x_wav.dim() == 4, f"Expected wavelet shape [B,1,H,W], got {x_wav.shape}"
