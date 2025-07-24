@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 import gc
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
 import os
 import torch.backends.cudnn
 import hashlib
@@ -83,11 +82,9 @@ SPEC = DeviceSpectrogram(
 def prep_input_array(audio_tensor, is_training=False):
     device = audio_tensor.device
     
-    # Ensure audio is 1D and exactly CONFIG["sample_rate"] length
     if audio_tensor.dim() > 1:
         audio_tensor = audio_tensor.squeeze()
     
-    # Pad or truncate to exact sample rate
     target_length = CONFIG["sample_rate"]
     if audio_tensor.size(-1) < target_length:
         pad_size = target_length - audio_tensor.size(-1)
@@ -95,10 +92,8 @@ def prep_input_array(audio_tensor, is_training=False):
     elif audio_tensor.size(-1) > target_length:
         audio_tensor = audio_tensor[:target_length]
     
-    # Normalize
     x_raw = (audio_tensor - audio_tensor.mean()) / (audio_tensor.std() + 1e-8)
     
-    # FFT processing - ensure consistent size
     x_fft = SPEC(x_raw)
     x_fft = torch.sqrt(x_fft + 1e-6)
 
@@ -107,7 +102,6 @@ def prep_input_array(audio_tensor, is_training=False):
     expected_freq_bins = n_fft // 2 + 1
     expected_time_frames = int(np.ceil(CONFIG["sample_rate"] / hop_length))
     
-    # Ensure FFT is exactly [257, 63] (n_fft//2+1, frames)
     if x_fft.size(0) > 128:
         x_fft = x_fft[:128, :]
     if x_fft.size(1) > 128:
@@ -126,7 +120,6 @@ def prep_input_array(audio_tensor, is_training=False):
                          size=(128, 128), 
                          mode='bilinear').squeeze()
     
-    # Pad if necessary
     if x_fft.size(0) < 128:
         pad_freq = 128 - x_fft.size(0)
         x_fft = F.pad(x_fft, (0, 0, 0, pad_freq))
@@ -134,15 +127,12 @@ def prep_input_array(audio_tensor, is_training=False):
         pad_time = 128 - x_fft.size(1)
         x_fft = F.pad(x_fft, (0, pad_time))
     
-    # Normalize FFT
     x_fft = (x_fft - x_fft.mean()) / (x_fft.std() + 1e-8)
     
-    # Wavelet processing
     audio_np = x_raw.cpu().numpy()
     coeffs = pywt.wavedec(audio_np, 'db4', level=4)
     cA4 = coeffs[0]
     
-    # Ensure wavelet coefficients are exactly 64*128 = 8192
     target_wav_length = 64 * 128
     if len(cA4) < target_wav_length:
         cA4 = np.pad(cA4, (0, target_wav_length - len(cA4)))
@@ -435,8 +425,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
             x_wav = x_wav.unsqueeze(1)
         
         # Forward pass with autocast
-        amp_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        with autocast(device_type='cuda', dtype=amp_dtype):
+        with autocast():
             logits = model(x_raw, x_fft, x_wav)
             loss = criterion(logits, y)
         
@@ -465,8 +454,7 @@ def evaluate(model, loader, criterion, device):
     y_true, y_prob = [], []
     total_loss = 0.0
     
-    amp_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    with torch.no_grad(), autocast(device_type='cuda', dtype=amp_dtype):
+    with torch.no_grad(), autocast():
         for x_raw, x_fft, x_wav, y in loader:
             x_raw = x_raw.unsqueeze(1).to(device)
             x_fft = x_fft.unsqueeze(1).to(device)
