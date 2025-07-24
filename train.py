@@ -23,9 +23,6 @@ import hashlib
 import torch.multiprocessing as mp
 from torch.amp import GradScaler, autocast
 
-print(f"GPU memory allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
-print(f"GPU memory reserved: {torch.cuda.memory_reserved()/1024**3:.2f} GB")
-
 # CUDA Configuration
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -624,8 +621,8 @@ def main():
         shuffle=True,
         num_workers=0,
         pin_memory=True,
-        multiprocessing_context='spawn',
-        persistent_workers=True,
+        # multiprocessing_context='spawn',
+        # persistent_workers=True,
         collate_fn=collate_fn,
         drop_last=True
     )
@@ -634,7 +631,7 @@ def main():
         batch_size=CONFIG["batch_size"],
         shuffle=False,
         num_workers=0,
-        multiprocessing_context='spawn',
+        #multiprocessing_context='spawn',
         collate_fn=collate_fn,
         drop_last=True
     )
