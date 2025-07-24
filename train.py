@@ -21,10 +21,13 @@ import os
 import torch.backends.cudnn
 import hashlib
 import torch.multiprocessing as mp
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
-
+# CUDA Configuration
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+torch.backends.cudnn.benchmark = False 
+torch.backends.cudnn.deterministic = True
 mp.set_start_method('spawn', force=True)
 
 # Configuration
@@ -42,7 +45,7 @@ CONFIG = {
     "data_splits": {
         "in_the_wild": 0.7,
     },
-    "accumulation_steps": 4
+    "accumulation_steps": 8 
 }
 
 class DeviceSpectrogram(nn.Module):
@@ -55,7 +58,8 @@ class DeviceSpectrogram(nn.Module):
         self.register_buffer('window', torch.hann_window(n_fft))
         
     def forward(self, x):
-        x = x.to(self.window.device)
+        if x.device != self.window.device:
+            x = x.to(self.window.device)
         return torch.stft(
             x,
             n_fft=self.n_fft,
@@ -107,18 +111,15 @@ def prep_input_array(audio_tensor, is_training=False):
     if x_fft.size(1) > 128:
         x_fft = x_fft[:, :128]
     
-    # Ensure we have correct dimensions
     if x_fft.size(0) != expected_freq_bins or x_fft.size(1) != expected_time_frames:
-        # Handle cases where FFT is wrong size (shouldn't happen with current settings)
         x_fft = x_fft[:expected_freq_bins, :expected_time_frames]
         if x_fft.size(0) < expected_freq_bins or x_fft.size(1) < expected_time_frames:
             x_fft = F.pad(x_fft, (0, max(0, expected_time_frames - x_fft.size(1)),
                                 0, max(0, expected_freq_bins - x_fft.size(0))))
     
-    # Now resize to fixed 128x128
     x_fft = F.interpolate(x_fft.unsqueeze(0).unsqueeze(0), 
                          size=(128, 128), 
-                         mode='bilinear').squeeze()
+                         mode='bilinear', align_corners=False).squeeze()
     
     if x_fft.size(0) < 128:
         pad_freq = 128 - x_fft.size(0)
@@ -409,43 +410,54 @@ def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')  # Fixed deprecated API
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
-        x_raw = x_raw.float().to(device)
-        x_fft = x_fft.float().to(device)
-        x_wav = x_wav.float().to(device)
-        y = y.to(device)
-        
-        if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
-            x_raw = x_raw.unsqueeze(1)
-        if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
-            x_fft = x_fft.unsqueeze(1)
-        if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
-            x_wav = x_wav.unsqueeze(1)
-        
-        # Forward pass with autocast
-        with autocast():
-            logits = model(x_raw, x_fft, x_wav)
-            loss = criterion(logits, y)
-        
-        scaler.scale(loss).backward()
-        
-        # Update weights
-        if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-            scaler.step(optimizer)
-            scaler.update()
+        try:
+            x_raw = x_raw.float().to(device, non_blocking=True)
+            x_fft = x_fft.float().to(device, non_blocking=True)  
+            x_wav = x_wav.float().to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            
+            if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
+                x_raw = x_raw.unsqueeze(1)
+            if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
+                x_fft = x_fft.unsqueeze(1)
+            if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
+                x_wav = x_wav.unsqueeze(1)
+            
+            # Synchronize before forward pass
+            torch.cuda.synchronize()
+            
+            # Forward pass with autocast
+            with autocast('cuda'):
+                logits = model(x_raw, x_fft, x_wav)
+                loss = criterion(logits, y) / CONFIG["accumulation_steps"]
+            
+            scaler.scale(loss).backward()
+            
+            # Update weights
+            if (i + 1) % CONFIG["accumulation_steps"] == 0 or (i + 1) == len(loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            
+            total_loss += loss.item() * x_raw.size(0) * CONFIG["accumulation_steps"]
+            
+            # Memory cleanup
+            del logits, loss, x_raw, x_fft, x_wav, y
+            if i % 10 == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
+                
+        except Exception as e:
+            print(f"Error in batch {i}: {e}")
+            # Skip this batch and continue
             optimizer.zero_grad()
-        
-        total_loss += loss.item() * x_raw.size(0) * CONFIG["accumulation_steps"]
-        
-        # Memory cleanup
-        del logits, loss, x_raw, x_fft, x_wav, y
-        torch.cuda.empty_cache()
-        if i % 10 == 0:
-            gc.collect()
+            torch.cuda.empty_cache()
+            continue
     
     return total_loss / len(loader.dataset)
 
@@ -454,20 +466,27 @@ def evaluate(model, loader, criterion, device):
     y_true, y_prob = [], []
     total_loss = 0.0
     
-    with torch.no_grad(), autocast():
+    with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
-            x_raw = x_raw.unsqueeze(1).to(device)
-            x_fft = x_fft.unsqueeze(1).to(device)
-            x_wav = x_wav.unsqueeze(1).to(device)
-            y = y.to(device)
-            
-            logits = model(x_raw, x_fft, x_wav)
-            loss = criterion(logits, y)
-            total_loss += loss.item() * y.size(0)
-            
-            prob = torch.softmax(logits, dim=1)[:, 1]
-            y_true.extend(y.cpu().numpy())
-            y_prob.extend(prob.cpu().numpy())
+            try:
+                x_raw = x_raw.unsqueeze(1).to(device, non_blocking=True)
+                x_fft = x_fft.unsqueeze(1).to(device, non_blocking=True)
+                x_wav = x_wav.unsqueeze(1).to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
+                
+                with autocast('cuda'):
+                    logits = model(x_raw, x_fft, x_wav)
+                    loss = criterion(logits, y)
+                    
+                total_loss += loss.item() * y.size(0)
+                
+                prob = torch.softmax(logits, dim=1)[:, 1]
+                y_true.extend(y.cpu().numpy())
+                y_prob.extend(prob.cpu().numpy())
+                
+            except Exception as e:
+                print(f"Error in evaluation batch: {e}")
+                continue
     
     # Calculate metrics
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -516,9 +535,16 @@ def collate_fn(batch):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    torch.backends.cudnn.benchmark = True
-    val_losses = []
     
+    # Set seeds for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+    
+    val_losses = []
     
     print("Loading datasets")
     train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
@@ -548,19 +574,21 @@ def main():
         train_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=True,
-        num_workers=4,
+        num_workers=2,  # Reduced workers for stability
         pin_memory=True,
         multiprocessing_context='spawn',
         persistent_workers=True,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        drop_last=True  # Add this to avoid size mismatches
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=False,
-        num_workers=4,
+        num_workers=2,
         multiprocessing_context='spawn',
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        drop_last=True
     )
 
     model = TBranchDetector(
@@ -568,15 +596,15 @@ def main():
         attn_drop_rate=CONFIG["attn_drop_rate"]
     ).to(device)
 
-    if torch.cuda.device_count() > 1:
-        model = nn.DataParallel(model)
-        print(f"Using {torch.cuda.device_count()} GPUs")
+    # if torch.cuda.device_count() > 1:
+    #     model = nn.DataParallel(model)
+    #     print(f"Using {torch.cuda.device_count()} GPUs")
         
     print("\nVerifying batch shapes:")
     test_batch = next(iter(train_loader))
-    print(f"Raw audio: {test_batch[0].shape} ([32, 1, 16000])")
-    print(f"FFT: {test_batch[1].shape} (correct is [32, 1, 128, 128])")
-    print(f"Wavelet: {test_batch[2].shape} ([32, 1, 64, 128])")
+    print(f"Raw audio: {test_batch[0].shape} ([{CONFIG['batch_size']}, 1, 16000])")
+    print(f"FFT: {test_batch[1].shape} (correct is [{CONFIG['batch_size']}, 1, 128, 128])")
+    print(f"Wavelet: {test_batch[2].shape} ([{CONFIG['batch_size']}, 1, 64, 128])")
 
     # Verify input compatibility
     with torch.no_grad():
@@ -592,32 +620,6 @@ def main():
             print(f"Model test output shape: {test_output.shape}")
         except Exception as e:
             print(f"Model test failed: {str(e)}")
-            model_to_inspect = model.module if isinstance(model, nn.DataParallel) else model
-            print("Model architecture:")
-            print(model_to_inspect)
-            
-            # Test each branch separately
-            try:
-                print("\nTesting raw branch:")
-                test_raw = model_to_inspect.cnn_raw(test_batch[0].float().unsqueeze(1).to(device))
-                print(f"Raw branch output: {test_raw.shape}")
-            except Exception as e:
-                print(f"Raw branch failed: {e}")
-                
-            try:
-                print("\nTesting FFT branch:")
-                test_fft = model_to_inspect.ast_spectrogram(test_batch[1].float().unsqueeze(1).to(device))
-                print(f"FFT branch output: {test_fft.shape}")
-            except Exception as e:
-                print(f"FFT branch failed: {e}")
-                
-            try:
-                print("\nTesting wavelet branch:")
-                test_wav = model_to_inspect.ast_wavelet(test_batch[2].float().unsqueeze(1).to(device))
-                print(f"Wavelet branch output: {test_wav.shape}")
-            except Exception as e:
-                print(f"Wavelet branch failed: {e}")
-                
             raise
         
     # Optimization

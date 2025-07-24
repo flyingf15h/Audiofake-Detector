@@ -139,27 +139,41 @@ class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
         super().__init__()
         padding = kernel_size // 2
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=padding)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=padding, bias=False)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=padding)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=padding, bias=False)
         self.bn2 = nn.BatchNorm1d(out_channels)
         
-        # Shortcut connection
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride),
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm1d(out_channels)
             )
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
+        x = x.contiguous()
         residual = self.shortcut(x)
         
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out, inplace=True)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
         
         out += residual
-        out = F.relu(out)
+        out = F.relu(out, inplace=True)
         
         return out
 
@@ -167,10 +181,11 @@ class RawCNN(nn.Module):
     def __init__(self, input_length=16000, num_classes=2):
         super().__init__()
         
-        self.conv1 = nn.Conv1d(1, 64, kernel_size=51, stride=4, padding=25) 
+        # First convolution with proper initialization
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=51, stride=4, padding=25, bias=False) 
         self.bn1 = nn.BatchNorm1d(64)
         
-        # Residual blocks
+        # Residual blocks with gradual channel increase
         self.res_blocks = nn.ModuleList([
             ResidualBlock(64, 64, kernel_size=3, stride=1),
             ResidualBlock(64, 128, kernel_size=3, stride=2),
@@ -182,17 +197,38 @@ class RawCNN(nn.Module):
                 
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         self.feature_dim = 512
+        
+        # Initialize the first conv layer
+        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_out', nonlinearity='relu')
+        nn.init.constant_(self.bn1.weight, 1)
+        nn.init.constant_(self.bn1.bias, 0)
     
     def forward(self, x):
         # Input shape: (B, 1, T)
         if x.dim() == 2:
             x = x.unsqueeze(1)
-            
-        x = F.relu(self.bn1(self.conv1(x)))
         
-        for res_block in self.res_blocks:
-            x = res_block(x)
+        # Ensure input is contiguous
+        x = x.contiguous()
         
+        # First convolution
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x, inplace=True)
+        
+        # Residual blocks
+        for i, res_block in enumerate(self.res_blocks):
+            try:
+                x = res_block(x)
+                # Add memory synchronization points
+                if i % 2 == 0:
+                    torch.cuda.synchronize()
+            except Exception as e:
+                print(f"Error in residual block {i}: {e}")
+                print(f"Input shape to block {i}: {x.shape}")
+                raise
+        
+        # Global pooling
         x = self.global_pool(x)
         x = x.squeeze(-1) 
         return x
@@ -209,6 +245,11 @@ class AttentionFusion(nn.Module):
         
         self.attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=8, batch_first=True)
         self.norm = nn.LayerNorm(hidden_dim)
+        
+        # Initialize weights
+        for proj in self.projections:
+            nn.init.xavier_uniform_(proj.weight)
+            nn.init.constant_(proj.bias, 0)
         
     def forward(self, features):
         # Project features to same dimension 
@@ -270,7 +311,7 @@ class TBranchDetector(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.Linear(fusion_hidden_dim, fusion_hidden_dim // 2),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(fusion_hidden_dim // 2, num_classes)
         )
@@ -300,6 +341,7 @@ class TBranchDetector(nn.Module):
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x_raw, x_fft, x_wav):
+        # Ensure proper dimensions
         if x_raw.dim() == 2:
             x_raw = x_raw.unsqueeze(1)  # [B, T] -> [B, 1, T]
         if x_fft.dim() == 3:
@@ -307,12 +349,18 @@ class TBranchDetector(nn.Module):
         if x_wav.dim() == 3:
             x_wav = x_wav.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
         
+        # Validate input shapes
         assert x_raw.shape[1] == 1 and x_raw.shape[2] == 16000, \
             f"Raw audio must be [B, 1, 16000], got {x_raw.shape}"
         assert x_fft.shape[1] == 1 and x_fft.shape[2] == 128 and x_fft.shape[3] == 128, \
             f"FFT must be [B, 1, 128, 128], got {x_fft.shape}"
         assert x_wav.shape[1] == 1 and x_wav.shape[2] == 64 and x_wav.shape[3] == 128, \
             f"Wavelet must be [B, 1, 64, 128], got {x_wav.shape}"
+        
+        # Make inputs contiguous for better CUDA performance
+        x_raw = x_raw.contiguous()
+        x_fft = x_fft.contiguous()
+        x_wav = x_wav.contiguous()
         
         try:
             # FFT branch
@@ -323,8 +371,8 @@ class TBranchDetector(nn.Module):
             raise
             
         try:
-            # Wavelet branch
             x_wav_resized = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
+            x_wav_resized = x_wav_resized.contiguous()
             ast_wavefeat = self.ast_wavelet(x_wav_resized)  # (B, embed_dim)
         except Exception as e:
             print(f"Error in wavelet branch: {e}")
@@ -332,7 +380,6 @@ class TBranchDetector(nn.Module):
             raise
             
         try:
-            # Raw audio branch
             cnn_features = self.cnn_raw(x_raw)  # (B, 512)
         except Exception as e:
             print(f"Error in raw branch: {e}")
