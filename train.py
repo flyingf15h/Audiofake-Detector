@@ -33,7 +33,7 @@ mp.set_start_method('spawn', force=True)
 # Configuration
 CONFIG = {
     "sample_rate": 16000,
-    "batch_size": 32,
+    "batch_size": 16,
     "num_epochs": 50,
     "lr": 3e-4,
     "weight_decay": 0.05,
@@ -45,7 +45,7 @@ CONFIG = {
     "data_splits": {
         "in_the_wild": 0.7,
     },
-    "accumulation_steps": 8 
+    "accumulation_steps": 8
 }
 
 class DeviceSpectrogram(nn.Module):
@@ -267,7 +267,6 @@ class AudioDataset(Dataset):
             if self.augment:
                 audio = self._augment(audio)
             
-            # Use standardized preprocessing
             x_raw, x_fft, x_wav = prep_input_array(audio, self.is_training)
             if x_raw.size(0) != CONFIG["sample_rate"]:
                 if x_raw.size(0) < CONFIG["sample_rate"]:
@@ -410,7 +409,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
-    scaler = GradScaler('cuda')  # Fixed deprecated API
+    scaler = GradScaler('cuda')
     
     for i, (x_raw, x_fft, x_wav, y) in enumerate(loader):
         try:
@@ -419,12 +418,20 @@ def train_epoch(model, loader, criterion, optimizer, device):
             x_wav = x_wav.float().to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             
-            if x_raw.dim() == 2:  # [B, 16000] -> [B, 1, 16000]
-                x_raw = x_raw.unsqueeze(1)
-            if x_fft.dim() == 3:  # [B, 128, 128] -> [B, 1, 128, 128]
-                x_fft = x_fft.unsqueeze(1)
-            if x_wav.dim() == 3:  # [B, 64, 128] -> [B, 1, 64, 128]
-                x_wav = x_wav.unsqueeze(1)
+            if x_raw.dim() == 2:  # [B, 16000]
+                x_raw = x_raw.unsqueeze(1)  # [B, 1, 16000]
+            elif x_raw.dim() == 4:  # [B, 1, 1, 16000]
+                x_raw = x_raw.squeeze(2)  # [B, 1, 16000]
+                
+            if x_fft.dim() == 3:  # [B, 128, 128]
+                x_fft = x_fft.unsqueeze(1)  # [B, 1, 128, 128]
+            elif x_fft.dim() == 5:  # [B, 1, 1, 128, 128]
+                x_fft = x_fft.squeeze(2)  # [B, 1, 128, 128]
+                
+            if x_wav.dim() == 3:  # [B, 64, 128]
+                x_wav = x_wav.unsqueeze(1)  # [B, 1, 64, 128]
+            elif x_wav.dim() == 5:  # [B, 1, 1, 64, 128] 
+                x_wav = x_wav.squeeze(2)  # [B, 1, 64, 128]
             
             # Synchronize before forward pass
             torch.cuda.synchronize()
@@ -454,7 +461,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
                 
         except Exception as e:
             print(f"Error in batch {i}: {e}")
-            # Skip this batch and continue
+            print(f"Shapes - raw: {x_raw.shape}, fft: {x_fft.shape}, wav: {x_wav.shape}")
             optimizer.zero_grad()
             torch.cuda.empty_cache()
             continue
@@ -469,9 +476,25 @@ def evaluate(model, loader, criterion, device):
     with torch.no_grad():
         for x_raw, x_fft, x_wav, y in loader:
             try:
-                x_raw = x_raw.unsqueeze(1).to(device, non_blocking=True)
-                x_fft = x_fft.unsqueeze(1).to(device, non_blocking=True)
-                x_wav = x_wav.unsqueeze(1).to(device, non_blocking=True)
+                if x_raw.dim() == 2:  # [B, 16000]
+                    x_raw = x_raw.unsqueeze(1)  # [B, 1, 16000]
+                elif x_raw.dim() == 4:  # [B, 1, 1, 16000]
+                    x_raw = x_raw.squeeze(2)  # [B, 1, 16000]
+                
+                if x_fft.dim() == 3:  # [B, 128, 128]
+                    x_fft = x_fft.unsqueeze(1)  # [B, 1, 128, 128]
+                elif x_fft.dim() == 5:  # [B, 1, 1, 128, 128]
+                    x_fft = x_fft.squeeze(2)  # [B, 1, 128, 128]
+                
+                if x_wav.dim() == 3:  # [B, 64, 128]
+                    x_wav = x_wav.unsqueeze(1)  # [B, 1, 64, 128]
+                elif x_wav.dim() == 5:  # [B, 1, 1, 64, 128]
+                    x_wav = x_wav.squeeze(2)  # [B, 1, 64, 128]
+                
+                # Move to device
+                x_raw = x_raw.to(device, non_blocking=True)
+                x_fft = x_fft.to(device, non_blocking=True)
+                x_wav = x_wav.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
                 
                 with autocast('cuda'):
@@ -486,9 +509,35 @@ def evaluate(model, loader, criterion, device):
                 
             except Exception as e:
                 print(f"Error in evaluation batch: {e}")
+                print(f"Shapes - raw: {x_raw.shape}, fft: {x_fft.shape}, wav: {x_wav.shape}")
                 continue
     
-    # Calculate metrics
+    if len(y_true) == 0 or len(y_prob) == 0:
+        print("Warning: No valid predictions made during evaluation!")
+        return {
+            "loss": float('inf'),
+            "accuracy": 0.0,
+            "auc": 0.0,
+            "report": "No valid predictions",
+            "threshold": 0.5,
+            "y_true": [],
+            "y_prob": []
+        }
+    
+    # Check if have both classes
+    unique_labels = set(y_true)
+    if len(unique_labels) < 2:
+        print(f"Warning: Only one class present in y_true: {unique_labels}")
+        return {
+            "loss": total_loss / len(loader.dataset),
+            "accuracy": max(y_true) if len(y_true) > 0 else 0.0,
+            "auc": 0.5,
+            "report": f"Only one class present: {unique_labels}",
+            "threshold": 0.5,
+            "y_true": y_true,
+            "y_prob": y_prob
+        }
+    
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
     optimal_idx = np.argmax(tpr - fpr)
     threshold = thresholds[optimal_idx]
@@ -509,17 +558,14 @@ def collate_fn(batch):
         raw_audio = torch.stack([item[0] for item in batch])
         assert raw_audio.dim() == 2 and raw_audio.shape[1] == 16000, \
             f"Raw audio should be [B, 16000], got {raw_audio.shape}"
-        raw_audio = raw_audio.unsqueeze(1)
         
         fft = torch.stack([item[1] for item in batch])
         assert fft.dim() == 3 and fft.shape[1:] == (128, 128), \
             f"FFT should be [B, 128, 128], got {fft.shape}"
-        fft = fft.unsqueeze(1)
         
         wavelet = torch.stack([item[2] for item in batch])
         assert wavelet.dim() == 3 and wavelet.shape[1:] == (64, 128), \
             f"Wavelet should be [B, 64, 128], got {wavelet.shape}"
-        wavelet = wavelet.unsqueeze(1)
         
         labels = torch.tensor([item[3] for item in batch])
         
@@ -536,7 +582,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Set seeds for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
@@ -574,18 +619,18 @@ def main():
         train_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=True,
-        num_workers=2,  # Reduced workers for stability
+        num_workers=4,
         pin_memory=True,
         multiprocessing_context='spawn',
         persistent_workers=True,
         collate_fn=collate_fn,
-        drop_last=True  # Add this to avoid size mismatches
+        drop_last=True
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=CONFIG["batch_size"],
         shuffle=False,
-        num_workers=2,
+        num_workers=4,
         multiprocessing_context='spawn',
         collate_fn=collate_fn,
         drop_last=True
@@ -596,15 +641,16 @@ def main():
         attn_drop_rate=CONFIG["attn_drop_rate"]
     ).to(device)
 
+    # No dataparallel to debug
     # if torch.cuda.device_count() > 1:
     #     model = nn.DataParallel(model)
     #     print(f"Using {torch.cuda.device_count()} GPUs")
         
     print("\nVerifying batch shapes:")
     test_batch = next(iter(train_loader))
-    print(f"Raw audio: {test_batch[0].shape} ([{CONFIG['batch_size']}, 1, 16000])")
-    print(f"FFT: {test_batch[1].shape} (correct is [{CONFIG['batch_size']}, 1, 128, 128])")
-    print(f"Wavelet: {test_batch[2].shape} ([{CONFIG['batch_size']}, 1, 64, 128])")
+    print(f"Raw audio: {test_batch[0].shape} ([{CONFIG['batch_size']}, 16000])")
+    print(f"FFT: {test_batch[1].shape} (correct is [{CONFIG['batch_size']}, 128, 128])")
+    print(f"Wavelet: {test_batch[2].shape} ([{CONFIG['batch_size']}, 64, 128])")
 
     # Verify input compatibility
     with torch.no_grad():
