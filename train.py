@@ -155,7 +155,8 @@ class CachedAudioDataset(Dataset):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def __getitem__(self, idx):
-        print(f"Dataset.__getitem__ called for index {idx}") 
+        if idx % 100 == 0:
+            print(f"Processing sample {idx}/{len(self.data)} ({idx/len(self.data)*100:.1f}%)")
         path, label = self.data[idx]
         uid = hashlib.md5(path.encode()).hexdigest()
         cache_path = self.cache_dir / f"{uid}.pt"
@@ -466,7 +467,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
             if i >= 2:
                 print("Stopping after 3 batches for debugging")
                 break
-                
+
         except Exception as e:
             print(f"Error in batch {i}: {e}")
             print(f"Shapes - raw: {x_raw.shape}, fft: {x_fft.shape}, wav: {x_wav.shape}")
@@ -603,6 +604,12 @@ def main():
     train_data = load_fakeorreal() + load_inthewild(CONFIG["data_splits"]["in_the_wild"]) + load_asvspoof()
     val_data = get_valset()
     
+    # REDUCE DATASET SIZE FOR TESTING
+    print(f"Original dataset sizes: train={len(train_data)}, val={len(val_data)}")
+    train_data = train_data[:160]  
+    val_data = val_data[:32]   
+    print(f"Reduced dataset sizes: train={len(train_data)}, val={len(val_data)}")
+    
     # Count classes for weighting
     class_counts = defaultdict(int)
     for _, label in train_data:
@@ -613,10 +620,14 @@ def main():
         class_counts[1]/total 
     ], device=device)
     
+    print(f"Class distribution: Real={class_counts[0]}, Fake={class_counts[1]}")
+    
     train_ds = CachedAudioDataset(train_data, cache_dir="train_cache", augment=True)
     val_ds = CachedAudioDataset(val_data, cache_dir="val_cache", augment=False)
      
     print(f"Loaded {len(train_ds)} training samples, {len(val_ds)} validation samples")
+    
+    print("Getting first sample to verify shapes...")
     sample = train_ds[0]
     print("Sample shapes:")
     print(f"Raw: {sample[0].shape} (should be [16000])")
@@ -629,8 +640,6 @@ def main():
         shuffle=True,
         num_workers=0,
         pin_memory=True,
-        # multiprocessing_context='spawn',
-        # persistent_workers=True,
         collate_fn=collate_fn,
         drop_last=True
     )
@@ -639,10 +648,11 @@ def main():
         batch_size=CONFIG["batch_size"],
         shuffle=False,
         num_workers=0,
-        #multiprocessing_context='spawn',
         collate_fn=collate_fn,
         drop_last=True
     )
+
+    print(f"DataLoaders created: train_batches={len(train_loader)}, val_batches={len(val_loader)}")
 
     model = TBranchDetector(
         drop_rate=CONFIG["drop_rate"],
@@ -694,7 +704,7 @@ def main():
         pct_start=0.3
     )
 
-    print("Starting training loop")
+    print("Testing DataLoader iteration...")
     print(f"Training loader length: {len(train_loader)}")
 
     try:
@@ -707,6 +717,7 @@ def main():
         print(f"ERROR getting first batch: {e}")
         import traceback
         traceback.print_exc()
+        return
 
     print("Testing model forward pass...")
     try:
@@ -725,12 +736,16 @@ def main():
         print(f"ERROR in model forward pass: {e}")
         import traceback
         traceback.print_exc()
-    print("Entering training loop")
+        return
+        
+    print("All tests passed! Starting training loop...")
+    
     # Training
     best_auc = 0.0
     patience_counter = 0
     
     for epoch in range(1, CONFIG["num_epochs"] + 1):
+        print(f"\n=== Starting Epoch {epoch}/{CONFIG['num_epochs']} ===")
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
         val_metrics = evaluate(model, val_loader, criterion, device)
         val_losses.append(val_metrics["loss"])
@@ -783,7 +798,7 @@ def main():
     plt.plot(fpr, tpr, label=f'AUC = {final_metrics["auc"]:.4f}')
     plt.xlabel('False Positive Rate')
     plt.ylabel('True Positive Rate')
-    plt.title('ROC Curve')
+    plt.title('ROC Curve - Test Run')
     plt.legend()
     plt.savefig('roc_curve.png')
     plt.savefig("/kaggle/working/roc_curve.png")
@@ -793,11 +808,14 @@ def main():
     plt.plot(range(1, len(val_losses) + 1), val_losses, marker='o')
     plt.xlabel("Epoch")
     plt.ylabel("Validation Loss")
-    plt.title("Validation Loss Over Epochs")
+    plt.title("Validation Loss Over Epochs - Test Run")
     plt.grid(True)
     plt.savefig("val_loss_curve.png")
     plt.savefig("/kaggle/working/val_loss_curve.png")
-
+    
+    print(f"\n TEST RUN COMPLETE")
+    print(f"Successfully trained on {len(train_data)} samples")
+    print("To run on full dataset, remove the dataset size reduction lines")
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
