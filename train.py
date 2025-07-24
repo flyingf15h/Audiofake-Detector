@@ -588,35 +588,59 @@ def main():
         
     print("\nVerifying batch shapes:")
     test_batch = next(iter(train_loader))
-    print(f"Raw audio: {test_batch[0].shape} (should be [32, 1, 16000])")
-    print(f"FFT: {test_batch[1].shape} (should be [32, 1, 128, 128])")
-    print(f"Wavelet: {test_batch[2].shape} (should be [32, 1, 64, 128])")
+    print(f"Raw audio: {test_batch[0].shape} ([32, 1, 16000])")
+    print(f"FFT: {test_batch[1].shape} (correct is [32, 1, 128, 128])")
+    print(f"Wavelet: {test_batch[2].shape} ([32, 1, 64, 128])")
 
-    # Verify model input compatibility
+    # Verify input compatibility
     with torch.no_grad():
         try:
-            test_output = model(
-                test_batch[0].to(device),
-                test_batch[1].to(device),
-                test_batch[2].to(device)
+            test_model = model.module if isinstance(model, nn.DataParallel) else model
+            test_model = test_model.to(device)
+            
+            test_output = test_model(
+                test_batch[0].float().to(device),
+                test_batch[1].float().to(device),
+                test_batch[2].float().to(device)
             )
             print(f"Model test output shape: {test_output.shape}")
         except Exception as e:
             print(f"Model test failed: {str(e)}")
-            # Add debug info
-            print("Model input requirements:")
-            print("Raw branch expects:", model.raw_branch_expected_shape())
-            print("FFT branch expects:", model.fft_branch_expected_shape())
-            print("Wavelet branch expects:", model.wavelet_branch_expected_shape())
+            model_to_inspect = model.module if isinstance(model, nn.DataParallel) else model
+            print("Model architecture:")
+            print(model_to_inspect)
+            
+            # Test each branch separately
+            try:
+                print("\nTesting raw branch:")
+                test_raw = model_to_inspect.cnn_raw(test_batch[0].float().unsqueeze(1).to(device))
+                print(f"Raw branch output: {test_raw.shape}")
+            except Exception as e:
+                print(f"Raw branch failed: {e}")
+                
+            try:
+                print("\nTesting FFT branch:")
+                test_fft = model_to_inspect.ast_spectrogram(test_batch[1].float().unsqueeze(1).to(device))
+                print(f"FFT branch output: {test_fft.shape}")
+            except Exception as e:
+                print(f"FFT branch failed: {e}")
+                
+            try:
+                print("\nTesting wavelet branch:")
+                test_wav = model_to_inspect.ast_wavelet(test_batch[2].float().unsqueeze(1).to(device))
+                print(f"Wavelet branch output: {test_wav.shape}")
+            except Exception as e:
+                print(f"Wavelet branch failed: {e}")
+                
             raise
-
-    # Optimization
-    criterion = HybridLoss(class_weights)
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=CONFIG["lr"],
-        weight_decay=CONFIG["weight_decay"]
-    )
+        
+        # Optimization
+        criterion = HybridLoss(class_weights)
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=CONFIG["lr"],
+            weight_decay=CONFIG["weight_decay"]
+        )
 
     # Get optimized lr 
     lr_finder = LRFinder(model, optimizer, criterion, device=device)

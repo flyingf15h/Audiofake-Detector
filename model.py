@@ -124,9 +124,10 @@ class WaveletTransform(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
         super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=kernel_size//2)
+        padding = kernel_size // 2
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding=padding)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=kernel_size//2)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, 1, padding=padding)
         self.bn2 = nn.BatchNorm1d(out_channels)
         
         # Shortcut connection
@@ -148,13 +149,11 @@ class ResidualBlock(nn.Module):
         
         return out
 
-
 class RawCNN(nn.Module):
     def __init__(self, input_length=16000, num_classes=2):
         super().__init__()
         
-        # First conv layer to capture temporal patterns
-        self.conv1 = nn.Conv1d(1, 64, kernel_size=51, stride=4, padding=38)
+        self.conv1 = nn.Conv1d(1, 64, kernel_size=51, stride=4, padding=25) 
         self.bn1 = nn.BatchNorm1d(64)
         
         # Residual blocks
@@ -166,23 +165,23 @@ class RawCNN(nn.Module):
             ResidualBlock(256, 256, kernel_size=3, stride=1),
             ResidualBlock(256, 512, kernel_size=3, stride=2),
         ])
-        
+                
         self.global_pool = nn.AdaptiveAvgPool1d(1)
         self.feature_dim = 512
     
     def forward(self, x):
-        # Args x: Raw waveform (B, 1, T)
-        # Returns features (B, feature_dim)
-        
+        # Input shape: (B, 1, T)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+            
         x = F.relu(self.bn1(self.conv1(x)))
         
         for res_block in self.res_blocks:
             x = res_block(x)
         
         x = self.global_pool(x)
-        x = x.squeeze(-1)  # (B, feature_dim)
+        x = x.squeeze(-1) 
         return x
-
 
 class SpectrogramExtractor(nn.Module):
     # Extract mel spectrograms from audio
@@ -336,33 +335,46 @@ class TBranchDetector(nn.Module):
         return spec
     
     def forward(self, x_raw, x_fft, x_wav):
-        if x_raw.dim() == 2: 
-            x_raw = x_raw.unsqueeze(1)
+        if x_raw.dim() == 2:
+            x_raw = x_raw.unsqueeze(1)  # [B, T] -> [B, 1, T]
         if x_fft.dim() == 3:
-            x_fft = x_fft.unsqueeze(1)
-        if x_wav.dim() == 3: 
-            x_wav = x_wav.unsqueeze(1)
+            x_fft = x_fft.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
+        if x_wav.dim() == 3:
+            x_wav = x_wav.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
         
-        assert x_raw.dim() == 3, f"Expected raw audio shape [B,1,L], got {x_raw.shape}"
-        assert x_fft.dim() == 4, f"Expected FFT shape [B,1,H,W], got {x_fft.shape}"
-        assert x_wav.dim() == 4, f"Expected wavelet shape [B,1,H,W], got {x_wav.shape}"
+        assert x_raw.shape[1] == 1 and x_raw.shape[2] == 16000, \
+            f"Raw audio must be [B, 1, 16000], got {x_raw.shape}"
+        assert x_fft.shape[1] == 1 and x_fft.shape[2] == 128 and x_fft.shape[3] == 128, \
+            f"FFT must be [B, 1, 128, 128], got {x_fft.shape}"
+        assert x_wav.shape[1] == 1 and x_wav.shape[2] == 64 and x_wav.shape[3] == 128, \
+            f"Wavelet must be [B, 1, 64, 128], got {x_wav.shape}"
         
-        if isinstance(self, nn.DataParallel):
-            x_raw = x_raw.squeeze(0) if x_raw.dim() == 4 else x_raw
-            x_fft = x_fft.squeeze(0) if x_fft.dim() == 5 else x_fft
-            x_wav = x_wav.squeeze(0) if x_wav.dim() == 5 else x_wav
-
-        x_fft = F.interpolate(x_fft, size=(128, 128), mode='bilinear', align_corners=False)
-        x_wav = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
-
-        ast_specfeat = self.ast_spectrogram(x_fft)  # (B, embed_dim)
-        ast_wavefeat = self.ast_wavelet(x_wav)  # (B, embed_dim)
-        cnn_features = self.cnn_raw(x_raw)  # (B, 512)
-
+        # Process each branch
+        try:
+            x_fft = F.interpolate(x_fft, size=(128, 128), mode='bilinear', align_corners=False)
+            ast_specfeat = self.ast_spectrogram(x_fft)  # (B, embed_dim)
+        except Exception as e:
+            print(f"Error in FFT branch: {e}")
+            raise
+            
+        try:
+            x_wav = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
+            ast_wavefeat = self.ast_wavelet(x_wav)  # (B, embed_dim)
+        except Exception as e:
+            print(f"Error in wavelet branch: {e}")
+            raise
+            
+        try:
+            cnn_features = self.cnn_raw(x_raw)  # (B, 512)
+        except Exception as e:
+            print(f"Error in raw branch: {e}")
+            raise
+        
+        # Fusion and classification
         all_features = [ast_specfeat, ast_wavefeat, cnn_features]
-        fused_features = self.fusion(all_features)  # (B, fusion_hidden_dim)
-
-        logits = self.classifier(fused_features)  # (B, num_classes)
+        fused_features = self.fusion(all_features)
+        logits = self.classifier(fused_features)
+        
         return logits
     
     def getbranch_features(self, x_raw, x_fft, x_wav):
