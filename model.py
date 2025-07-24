@@ -61,6 +61,10 @@ class AST(nn.Module):
             for _ in range(depth)
         ])
         self.norm = nn.LayerNorm(embed_dim)
+        
+        # Initialize weights
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def interpolate_pos_encoding(self, x, w, h):
         n_patches = x.shape[1] - 1
@@ -70,12 +74,22 @@ class AST(nn.Module):
         class_pos_embed = self.pos_embed[:, 0]
         patch_pos_embed = self.pos_embed[:, 1:]
         dim = x.shape[-1]
-        patch_pos_embed = patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim)
+        
+        # Calculate original grid size
+        orig_size = int(math.sqrt(N))
+        patch_pos_embed = patch_pos_embed.reshape(1, orig_size, orig_size, dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)  # (1, dim, orig_size, orig_size)
+        
+        # Calculate new grid size
+        new_h = h // self.patch_embed.patch_size[0]
+        new_w = w // self.patch_embed.patch_size[1]
+        
         patch_pos_embed = F.interpolate(
-            patch_pos_embed, size=(h // self.patch_embed.patch_size[0], w // self.patch_embed.patch_size[1]), mode='bicubic', align_corners=False
+            patch_pos_embed, size=(new_h, new_w), mode='bicubic', align_corners=False
         )
-        patch_pos_embed = patch_pos_embed.flatten(1, 2)
-        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).flatten(1, 2)  # (1, new_h*new_w, dim)
+        
+        return torch.cat((class_pos_embed.unsqueeze(1), patch_pos_embed), dim=1)
 
     def forward(self, x):
         B, C, H, W = x.shape
@@ -183,40 +197,12 @@ class RawCNN(nn.Module):
         x = x.squeeze(-1) 
         return x
 
-class SpectrogramExtractor(nn.Module):
-    # Extract mel spectrograms from audio
-    def __init__(self, sample_rate=16000, n_mels=128, n_fft=1024, hop_length=512):
-        super().__init__()
-        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate,
-            n_mels=n_mels,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            power=2.0
-        )
-        
-    def forward(self, x):
-        # Args x = Raw audio (B, 1, T)
-        # Returns Mel spectrogram (B, 1, n_mels, time_frames)
-        
-        x = x.squeeze(1)  # (B, T)
-        mel_spec = self.mel_spectrogram(x)
-        mel_spec = torch.log(mel_spec + 1e-8)
-
-        if self.training:  
-            mel_spec = self.spec_augment(mel_spec)
-            mel_spec = self.freq_augment(mel_spec)
-            
-        return mel_spec.unsqueeze(1)  
-
-
 class AttentionFusion(nn.Module):
     def __init__(self, feature_dims, hidden_dim=512):
         super().__init__()
         self.feature_dims = feature_dims
         self.hidden_dim = hidden_dim
         
-        # Project each feature to same dimension
         self.projections = nn.ModuleList([
             nn.Linear(dim, hidden_dim) for dim in feature_dims
         ])
@@ -225,9 +211,6 @@ class AttentionFusion(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
         
     def forward(self, features):
-        # Args features = List of feature tensors [(B, D1), (B, D2), (B, D3)]
-        # Returns fused features (B, hidden_dim)
-    
         # Project features to same dimension 
         projected_features = []
         for i, feat in enumerate(features):
@@ -241,7 +224,6 @@ class AttentionFusion(nn.Module):
         fused_features = self.norm(fused_features)
         
         return fused_features
-
 
 class TBranchDetector(nn.Module):
     def __init__(self, 
@@ -258,11 +240,11 @@ class TBranchDetector(nn.Module):
                  attn_drop_rate=0.2):
         super().__init__()
         
-        self.spectrogram_extractor = SpectrogramExtractor(sample_rate=sample_rate)
-        self.wavelet_transform = WaveletTransform()
+        # Store input length for reference
+        self.raw_input_length = input_length
         
         self.ast_spectrogram = AST(
-            img_size=ast_img_size,  # Now 128 instead of 224
+            img_size=ast_img_size,
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
@@ -272,7 +254,7 @@ class TBranchDetector(nn.Module):
         )
         
         self.ast_wavelet = AST(
-            img_size=ast_img_size,  # Now 128 instead of 224
+            img_size=ast_img_size,
             patch_size=ast_patch_size,
             embed_dim=ast_embed_dim,
             depth=ast_depth,
@@ -312,27 +294,10 @@ class TBranchDetector(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
-    
-    def resize_spectrogram(self, spec, target_size=128):
-        while spec.dim() > 4:
-            squeezed = False
-            for dim in reversed(range(spec.dim())):
-                if spec.shape[dim] == 1:
-                    spec = spec.squeeze(dim)
-                    squeezed = True
-                    break
-            
-            if not squeezed:
-                raise ValueError(f"Cannot reduce shape {spec.shape} to 4D - no singleton dimensions found")
-    
-        if spec.dim() == 3:  # [B,H,W] -> [B,1,H,W]
-            spec = spec.unsqueeze(1)
-        elif spec.dim() == 2:  # [H,W] -> [1,1,H,W] 
-            spec = spec.unsqueeze(0).unsqueeze(0)
-        elif spec.dim() != 4:
-            raise ValueError(f"Cannot handle tensor with {spec.dim()} dimensions, shape: {spec.shape}")
-            
-        return spec
+        elif isinstance(m, nn.Conv1d) or isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x_raw, x_fft, x_wav):
         if x_raw.dim() == 2:
@@ -349,25 +314,29 @@ class TBranchDetector(nn.Module):
         assert x_wav.shape[1] == 1 and x_wav.shape[2] == 64 and x_wav.shape[3] == 128, \
             f"Wavelet must be [B, 1, 64, 128], got {x_wav.shape}"
         
-        # Process each branch
         try:
-            x_fft = F.interpolate(x_fft, size=(128, 128), mode='bilinear', align_corners=False)
+            # FFT branch
             ast_specfeat = self.ast_spectrogram(x_fft)  # (B, embed_dim)
         except Exception as e:
             print(f"Error in FFT branch: {e}")
+            print(f"FFT input shape: {x_fft.shape}")
             raise
             
         try:
-            x_wav = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
-            ast_wavefeat = self.ast_wavelet(x_wav)  # (B, embed_dim)
+            # Wavelet branch
+            x_wav_resized = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
+            ast_wavefeat = self.ast_wavelet(x_wav_resized)  # (B, embed_dim)
         except Exception as e:
             print(f"Error in wavelet branch: {e}")
+            print(f"Wavelet input shape: {x_wav.shape}")
             raise
             
         try:
+            # Raw audio branch
             cnn_features = self.cnn_raw(x_raw)  # (B, 512)
         except Exception as e:
             print(f"Error in raw branch: {e}")
+            print(f"Raw input shape: {x_raw.shape}")
             raise
         
         # Fusion and classification
@@ -377,7 +346,7 @@ class TBranchDetector(nn.Module):
         
         return logits
     
-    def getbranch_features(self, x_raw, x_fft, x_wav):
+    def gbf(self, x_raw, x_fft, x_wav):
         if isinstance(self, nn.DataParallel):
             device = next(self.module.parameters()).device
         else:
@@ -386,17 +355,26 @@ class TBranchDetector(nn.Module):
         x_raw, x_fft, x_wav = x_raw.to(device), x_fft.to(device), x_wav.to(device)
 
         if isinstance(self, nn.DataParallel):
-            return self.module.gbf(x_raw, x_fft, x_wav)
+            return self.module._gbf_impl(x_raw, x_fft, x_wav)
         else:
-            return self.gbf(x_raw, x_fft, x_wav)
+            return self._gbf_impl(x_raw, x_fft, x_wav)
         
-    def gbf(self, x_raw, x_fft, x_wav):
+    def _gbf_impl(self, x_raw, x_fft, x_wav):
+        # Input validation and reshaping
+        if x_raw.dim() == 2:
+            x_raw = x_raw.unsqueeze(1)
+        if x_fft.dim() == 3:
+            x_fft = x_fft.unsqueeze(1)
+        if x_wav.dim() == 3:
+            x_wav = x_wav.unsqueeze(1)
+            
+        # Process branches
         ast_specfeat = self.ast_spectrogram(x_fft)
-        ast_wavefeat = self.ast_wavelet(x_wav)
+        x_wav_resized = F.interpolate(x_wav, size=(128, 128), mode='bilinear', align_corners=False)
+        ast_wavefeat = self.ast_wavelet(x_wav_resized)
         cnn_features = self.cnn_raw(x_raw)
         
         return ast_specfeat, ast_wavefeat, cnn_features
-
 
 def create_model(sample_rate=16000, input_length=16000, num_classes=2):
     model = TBranchDetector(
