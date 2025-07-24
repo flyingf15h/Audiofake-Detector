@@ -21,7 +21,6 @@ from torch.amp import GradScaler, autocast
 import os
 import torch.backends.cudnn
 import hashlib
-from torch_lr_finder import LRFinder
 import torch.multiprocessing as mp
 from torch.cuda.amp import GradScaler, autocast
 
@@ -416,16 +415,6 @@ class HybridLoss(nn.Module):
         
         return 0.5 * ce_loss + 0.5 * focal_loss
 
-# Wrapper class for LRFinder compatibility
-class ModelWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-    
-    def forward(self, batch):
-        x_raw, x_fft, x_wav, _ = batch
-        return self.model(x_raw, x_fft, x_wav)
-
 def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
@@ -651,26 +640,7 @@ def main():
         weight_decay=CONFIG["weight_decay"]
     )
 
-    wrapped_model = ModelWrapper(model)
-    lr_finder = LRFinder(wrapped_model, optimizer, criterion, device=device)
-    lr_finder.range_test(train_loader, end_lr=1, num_iter=100)
-    lr_finder.plot() 
-    plt.savefig('lr_finder.png')
-    optimal_lr = lr_finder.suggestion()
-    print(f"Suggested LR: {optimal_lr}")
-    lr_finder.reset()
-    
-    # Update learning rate
-    if optimal_lr is not None:
-        CONFIG["lr"] = optimal_lr
-    else:
-        print("LR finder didn't find a good learning rate, using default")
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=CONFIG["lr"],
-        weight_decay=CONFIG["weight_decay"]
-    )
+    print(f"Using learning rate: {CONFIG['lr']}")
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
