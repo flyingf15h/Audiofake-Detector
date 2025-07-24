@@ -39,7 +39,7 @@ CONFIG = {
     "weight_decay": 0.05,
     "drop_rate": 0.1,
     "attn_drop_rate": 0.1,
-    "patience": 8,
+    "patience": 14,
     "n_fft": 512,
     "hop_length": 256,
     "data_splits": {
