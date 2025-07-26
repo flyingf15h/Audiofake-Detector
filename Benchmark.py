@@ -10,6 +10,10 @@ from scipy.interpolate import interp1d
 from pathlib import Path
 from model import TBranchDetector
 from tqdm import tqdm
+import json
+import matplotlib.pyplot as plt
+from datetime import datetime
+import os
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -29,18 +33,17 @@ def calculate_eer(y_true, y_prob):
     return eer
 
 def preprocess(audio, sr=16000):
-    # Match training exactly
     audio = librosa.util.fix_length(audio, size=16000)
     
-    # Raw waveform (identical to training)
+    # Raw waveform
     x_raw = (audio - np.mean(audio)) / (np.std(audio) + 1e-8)
     
-    # Spectrogram (training uses n_fft=512, hop=256)
+    # Spectrogram (match training params)
     stft = librosa.stft(audio, n_fft=512, hop_length=256)
-    mag = np.abs(stft)[:128, :128]  # Crop to match training
+    mag = np.abs(stft)[:128, :128]
     x_fft = (mag - np.mean(mag)) / (np.std(mag) + 1e-8)
     
-    # Wavelet (identical to training)
+    # Wavelet
     coeffs = pywt.wavedec(audio, 'db4', level=4)
     cA4_resized = np.resize(coeffs[0], (64, 128))
     x_wav = (cA4_resized - np.mean(cA4_resized)) / (np.std(cA4_resized) + 1e-8)
@@ -82,11 +85,13 @@ def load_for_original(max_samples=None):
         data += [(str(f), label) for f in files]
     return data
 
-def load_in_the_wild(max_samples=None):
-    base = Path("/kaggle/input/in-the-wild-audio-deepfake/release_in_the_wild")
+def load_deep_voice(max_samples=None):
+    base = Path("/kaggle/input/deep-voice-deepfake-voice-recognition/KAGGLE/AUDIO")
     data = []
+    
+    # Assuming structure: /AUDIO/real/... and /AUDIO/fake/...
     for label, name in [(0, 'real'), (1, 'fake')]:
-        files = list((base / name).glob("*.wav"))
+        files = list((base / name).glob("*.wav")) + list((base / name).glob("*.mp3"))
         if max_samples:
             files = files[:max_samples]
         data += [(str(f), label) for f in files]
@@ -139,7 +144,7 @@ def evaluate(dataloader, name="Dataset"):
     
     if not y_true:
         print(f"No valid samples in {name}!")
-        return
+        return None
     
     # Calculate metrics
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -148,28 +153,63 @@ def evaluate(dataloader, name="Dataset"):
     y_pred = (np.array(y_prob) >= threshold).astype(int)
     eer = calculate_eer(y_true, y_prob)
     
+    metrics = {
+        "dataset": name,
+        "threshold": float(threshold),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1": float(f1_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred)),
+        "recall": float(recall_score(y_true, y_pred)),
+        "auc": float(roc_auc_score(y_true, y_prob)),
+        "eer": float(eer),
+        "classification_report": classification_report(y_true, y_pred, target_names=['Real', 'Fake'], output_dict=True),
+        "num_samples": len(y_true),
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Print results
     print(f"\nResults for {name}:")
-    print(f"Optimal Threshold: {threshold:.4f}")
-    print(f"Accuracy: {accuracy_score(y_true, y_pred):.4f}")
-    print(f"F1: {f1_score(y_true, y_pred):.4f}")
-    print(f"Precision: {precision_score(y_true, y_pred):.4f}")
-    print(f"Recall: {recall_score(y_true, y_pred):.4f}")
-    print(f"AUC: {roc_auc_score(y_true, y_prob):.4f}")
-    print(f"EER: {eer:.4f}")
+    print(f"Optimal Threshold: {metrics['threshold']:.4f}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"F1: {metrics['f1']:.4f}")
+    print(f"Precision: {metrics['precision']:.4f}")
+    print(f"Recall: {metrics['recall']:.4f}")
+    print(f"AUC: {metrics['auc']:.4f}")
+    print(f"EER: {metrics['eer']:.4f}")
     print("Classification Report:")
     print(classification_report(y_true, y_pred, target_names=['Real', 'Fake']))
+    
+    # Plot ROC curve
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, label=f"AUC = {metrics['auc']:.4f}\nEER = {metrics['eer']:.4f}")
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - {name}')
+    plt.legend(loc='lower right')
+    roc_path = f"/kaggle/working/roc_{name.lower().replace('-', '_')}.png"
+    plt.savefig(roc_path)
+    plt.close()
+    metrics["roc_curve_path"] = roc_path
+    
+    return metrics
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
     
+    # Create output directory
+    os.makedirs("/kaggle/working/benchmark_results", exist_ok=True)
+    
     # Load datasets
     datasets = {
         "FOR-Original": load_for_original(max_samples=1000),
-        "In-the-Wild": load_in_the_wild(max_samples=300),
-        "ASVspoof": load_asvspoof(max_samples=700),
+        "ASVspoof-2021": load_asvspoof(max_samples=700),
+        "Deep-Voice": load_deep_voice(max_samples=1000),
     }
     
-    # Evaluate each
+    all_metrics = {}
+    
+    # Evaluate each dataset
     for name, data in datasets.items():
         loader = DataLoader(
             AudioDataset(data),
@@ -182,6 +222,39 @@ if __name__ == "__main__":
                 torch.tensor([item[3] for item in x])
             )
         )
-        evaluate(loader, name)
+        metrics = evaluate(loader, name)
+        if metrics:
+            all_metrics[name] = metrics
     
+    # Save all metrics to JSON
+    metrics_path = "/kaggle/working/benchmark_results/metrics.json"
+    with open(metrics_path, 'w') as f:
+        json.dump(all_metrics, f, indent=2)
+    print(f"\nSaved all metrics to {metrics_path}")
+    
+    # Generate summary report
+    report_path = "/kaggle/working/benchmark_results/summary.txt"
+    with open(report_path, 'w') as f:
+        f.write("Audio Deepfake Benchmark Results\n")
+        f.write("="*40 + "\n\n")
+        f.write(f"Evaluation timestamp: {datetime.now().isoformat()}\n\n")
+        
+        for name, metrics in all_metrics.items():
+            f.write(f"Dataset: {name}\n")
+            f.write("-"*40 + "\n")
+            f.write(f"Num Samples: {metrics['num_samples']}\n")
+            f.write(f"Accuracy: {metrics['accuracy']:.4f}\n")
+            f.write(f"F1 Score: {metrics['f1']:.4f}\n")
+            f.write(f"AUC: {metrics['auc']:.4f}\n")
+            f.write(f"EER: {metrics['eer']:.4f}\n")
+            f.write("\nClassification Report:\n")
+            f.write(classification_report(
+                y_true=None, y_pred=None,
+                target_names=['Real', 'Fake'],
+                output_dict=False,
+                **metrics['classification_report']
+            ))
+            f.write("\n\n")
+    
+    print(f"Saved summary report to {report_path}")
     torch.cuda.empty_cache()
