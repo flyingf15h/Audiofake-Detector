@@ -21,7 +21,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = torch.nn.DataParallel(TBranchDetector()).to(device)
 model.load_state_dict(
     torch.load(
-        "/kaggle/input/audifake-detector/pytorch/default/1/best_model.pth",
+        "/kaggle/input/wavspectr/pytorch/default/1/best_model.pth",
         map_location=device
     )
 )
